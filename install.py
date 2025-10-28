@@ -48,6 +48,16 @@ class AirGradientInstaller(ExtensionInstaller):
                 },
                 'AirGradient': {
                     'poll_secs'          : 15,
+                    'LoopFields' : {
+                        'pm01'            : 'pm1_0', 
+                        'pm02Copmensateed': 'pm2_5',
+                        'pm10'            : 'pm10_0', 
+                        'rco2'            : 'co2',
+                        'tvocIndex'       : 'tvocIndex',
+                        'tvocRaw'         : 'tvoc',
+                        'noxIndex'        : 'noxIndex',
+                        'noxRaw'          : 'nox',
+                    },
                     'Proxy1'   : {
                         'enable'         : False,
                         'hostname'       : 'proxy1',

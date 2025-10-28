@@ -85,15 +85,15 @@ weewx.units.default_unit_label_dict['nox_index']  = ' NOx Index'
 
 weewx.units.default_unit_format_dict['aqi']  = '%d'
 weewx.units.default_unit_format_dict['aqi_color'] = '%d'
-weewx.units.default_unit_format_dict['tvoc_index'] = '%f'
-weewx.units.default_unit_format_dict['nox_index'] = '%f'
+weewx.units.default_unit_format_dict['tvoc_index'] = '%d'
+weewx.units.default_unit_format_dict['nox_index'] = '%d'
 
 weewx.units.obs_group_dict['pm2_5_aqi'] = 'air_quality_index'
 weewx.units.obs_group_dict['pm2_5_aqi_color'] = 'air_quality_color'
 weewx.units.obs_group_dict['tvocIndex'] = 'tvoc_index'
-weewx.units.obs_group_dict['tvocRaw'] = 'group_concentration'
+weewx.units.obs_group_dict['tvoc'] = 'group_concentration'
 weewx.units.obs_group_dict['noxIndex'] = 'nox_index'
-weewx.units.obs_group_dict['noxRaw'] = 'group_concentration'
+weewx.units.obs_group_dict['nox'] = 'group_concentration'
 
 class Source:
     def __init__(self, config_dict, name, is_proxy):
@@ -148,6 +148,7 @@ class Configuration:
     archive_delay : int               # Immutable
     poll_secs     : int               # Immutable
     fresh_secs    : int               # Immutable
+    loop_fields   : Dict[str, str]    # Immutable
     sources       : List[Source]      # Immutable
 
 def datetime_from_reading(dt_str):
@@ -328,6 +329,7 @@ class AirGradient(StdService):
             archive_delay = to_int(config_dict['StdArchive'].get('archive_delay', 15)),
             poll_secs     = poll_secs,
             fresh_secs    = fresh_secs,
+            loop_fields   = AirGradient.configure_loop_fields(self.config_dict),
             sources       = AirGradient.configure_sources(self.config_dict))
 
         log.info('poll_secs : %d' % self.cfg.poll_secs)
@@ -364,47 +366,76 @@ class AirGradient(StdService):
             if self.cfg.reading is not None and \
                     self.cfg.reading.measurementTime.timestamp() + self.cfg.fresh_secs >= time.time():
                 log.debug('Time of reading being inserted: %s' % timestamp_to_string(self.cfg.reading.measurementTime.timestamp()))
-                # Insert pm1_0, pm2_5, pm10_0, aqi and aqic into loop packet.
-                if self.cfg.reading.pm01 is not None:
-                    event.packet['pm1_0'] = self.cfg.reading.pm01
-                    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
-                if self.cfg.reading.pm10 is not None:
-                    event.packet['pm10_0'] = self.cfg.reading.pm10
-                    log.debug('Inserted packet[pm10_0]: %f into packet.' % event.packet['pm10_0'])
-                if self.cfg.reading.pm02Compensated is not None:
-                    event.packet['pm2_5'] = self.cfg.reading.pm02Compensated
-                    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
-                elif self.cfg.reading.pm02 is not None:
-                    event.packet['pm2_5'] = self.cfg.reading.pm02
-                    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
-                    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
 
-                if 'pm2_5' in event.packet:
-                    event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(event.packet['pm2_5'])
-                if 'pm2_5_aqi' in event.packet:
-                    event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
+                reading_dict = self.cfg.reading.__dict__
+                for rec_field in self.cfg.loop_fields.keys():
+                    if rec_field in reading_dict and reading_dict[rec_field] is not None:
+                        log.debug('packet[%s] = %r' % (self.cfg.loop_fields[rec_field], reading_dict[rec_field]))
+                        event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
+                
+                #if 'pm2_5' in event.packet:
+                #    event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(event.packet['pm2_5'])
+                #if 'pm2_5_aqi' in event.packet:
+                #    event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
 
-                if self.cfg.reading.rco2 is not None:
-                    event.packet['co2'] = self.cfg.reading.rco2
-                    log.debug('Inserted packet[co2]: %f into packet.' % event.packet['co2'])
+                ## Insert pm1_0, pm2_5, pm10_0, aqi and aqic into loop packet.
+                #if self.cfg.reading.pm01 is not None:
+                #    event.packet['pm1_0'] = self.cfg.reading.pm01
+                #    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
+                #if self.cfg.reading.pm10 is not None:
+                #    event.packet['pm10_0'] = self.cfg.reading.pm10
+                #    log.debug('Inserted packet[pm10_0]: %f into packet.' % event.packet['pm10_0'])
+                #if self.cfg.reading.pm02Compensated is not None:
+                #    event.packet['pm2_5'] = self.cfg.reading.pm02Compensated
+                #    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
+                #elif self.cfg.reading.pm02 is not None:
+                #    event.packet['pm2_5'] = self.cfg.reading.pm02
+                #    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
+                #    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
+                #
+                #if 'pm2_5' in event.packet:
+                #    event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(event.packet['pm2_5'])
+                #if 'pm2_5_aqi' in event.packet:
+                #    event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
+                #
+                #if self.cfg.reading.rco2 is not None:
+                #    event.packet['co2'] = self.cfg.reading.rco2
+                #    log.debug('Inserted packet[co2]: %f into packet.' % event.packet['co2'])
 
-                if self.cfg.reading.tvocIndex is not None:
-                    event.packet['tvocIndex'] = self.cfg.reading.tvocIndex
-                    log.debug('Inserted packet[tvocIndex]: %f into packet.' % event.packet['tvocIndex'])
+                #if self.cfg.reading.tvocIndex is not None:
+                #    event.packet['tvocIndex'] = self.cfg.reading.tvocIndex
+                #    log.debug('Inserted packet[tvocIndex]: %f into packet.' % event.packet['tvocIndex'])
 
-                if self.cfg.reading.tvocRaw is not None:
-                    event.packet['tvocRaw'] = self.cfg.reading.tvocRaw
-                    log.debug('Inserted packet[tvocRaw]: %f into packet.' % event.packet['tvocRaw'])
+                #if self.cfg.reading.tvocRaw is not None:
+                #    event.packet['tvocRaw'] = self.cfg.reading.tvocRaw
+                #    log.debug('Inserted packet[tvocRaw]: %f into packet.' % event.packet['tvocRaw'])
 
-                if self.cfg.reading.noxIndex is not None:
-                    event.packet['noxIndex'] = self.cfg.reading.noxIndex
-                    log.debug('Inserted packet[noxIndex]: %f into packet.' % event.packet['noxIndex'])
+                #if self.cfg.reading.noxIndex is not None:
+                #    event.packet['noxIndex'] = self.cfg.reading.noxIndex
+                #    log.debug('Inserted packet[noxIndex]: %f into packet.' % event.packet['noxIndex'])
 
-                if self.cfg.reading.noxRaw is not None:
-                    event.packet['noxRaw'] = self.cfg.reading.noxRaw
-                    log.debug('Inserted packet[noxRaw]: %f into packet.' % event.packet['noxRaw'])
+                #if self.cfg.reading.noxRaw is not None:
+                #    event.packet['noxRaw'] = self.cfg.reading.noxRaw
+                #    log.debug('Inserted packet[noxRaw]: %f into packet.' % event.packet['noxRaw'])
             else:
                 log.error('Found no fresh reading to insert.')
+
+    def configure_loop_fields(config_dict):
+        loop_fields = {}
+        try:
+            # Raise KeyEror if 'LoopFields' not in config_dict.
+            loop_fields_dict = config_dict['LoopFields']
+            for key in loop_fields_dict:
+                if not isinstance(key, str):
+                    log.info('keys in LoopFields must be strings that corresspond to AirGradient fields, skipping this entry: %s' % key)
+                elif not isinstance(loop_fields_dict[key], str):
+                    log.info('values in LoopFields must be strings that corresspond to Loop record fields, skipping this entry: %s' % key)
+                else:
+                    loop_fields[key] = loop_fields_dict[key]
+        except KeyError:
+            log.info("No LoopFields section in weewx.conf's AirGradient section, no fields will be written to Loop records")
+
+        return loop_fields
 
     def configure_sources(config_dict):
         sources = []

@@ -15,23 +15,22 @@ schema.  The extension should install and run on WeeWX 4, but is not supported b
 
 weewx-airgradient requires the
 [wview_extended](https://github.com/weewx/weewx/blob/master/src/schemas/wview_extended.py)
-in WeeWX 4 or 5 that contains `pm1_0`, `pm2_5` `pm10_0` and `o2` columns.  With the weewx-airgradient
-extension, Loop records will be populated with `pm1_0`, `pm2_5`, `pm10_0` and `o2` fields that
-correspond to AirGradient's `pm01`, `pm02` or `pm02Compensated`, `pm10` and `rco2` fields.
+in WeeWX 4 or 5 that contains `pm1_0`, `pm2_5` `pm10_0` and `co2` columns.  With the weewx-airgradient
+extension, by default, Loop records will be populated with `pm1_0`, `pm2_5`, `pm10_0` `co2`,
+`nox`, `noxIndex`, `tvoc` and `tvocIndex`  fields that
+correspond to AirGradient's `pm01`, `pm02Compensated`, `pm10` `rco2`, `noxRaw`, `noxIndex`,
+`tvocRaw` and `tvocIndex` fields.
 
-In addition to the above fields, weewx-airgradient inserts `tvocIndex`, `tvocRaw`, `noxIndex` and `noxRaw'.
+As mentioned above, weewx-airgradient inserts `tvoc`, `tvocIndex`, `nox` and `noxIndex'.
 These fields are accessible in the current loop record with the `.current` syntax.  If one wishes to
 have these fields saved in archive records, one will need to add these columns to the schema.
 
 Note: The AQI index values conform to the [2024 EPA definition](https://www.epa.gov/system/files/documents/2024-02/pm-naaqs-air-quality-index-fact-sheet.pdf)
 
-If the AirGradient is configured to use a correction (available in the pm02Compensated field, it will be the value inserted into the loop rcords.  If not, pm02
-will be the value inserted.
-
-In addition to `pm1_0`, `pm2_5` `pm10_0` and `no2`, `tvocIndex`, `tvocRaw`, `noxIndex` and `noxRaw` are available (even if you havent added those columns to the database.  (Althouh, if not added, they are only available as `.current` values.
+In addition to `pm1_0`, `pm2_5` `pm10_0` and `co2`; the fields`tvoc`, `tvocIndex`, `nox` and `noxIndex` are available (even if you havent added those columns to the database.  (Althouh, if not added, they are only available as `.current` values.
 
 In addition, AQI variables are also available (even though they are not in the
-database) via WeeWX 4's (or 5's) [XTypes](https://github.com/weewx/weewx/wiki/WeeWX-V4-user-defined-types).
+database) via WeeWX's [XTypes](https://github.com/weewx/weewx/wiki/WeeWX-V4-user-defined-types).
 pm2_5_aqi is automatically computed from pm2_5 and can be used in reports
 (`$current.pm2_5_aqi`) and in graphs `[[[[pm2_5_aqi]]]`.  Also available is
 is the [RGBint](https://www.shodor.org/stella2java/rgbint.html) value
@@ -84,7 +83,9 @@ If you don't meet the following requirements, don't install this extension.
    `weectl extension install weewx-airgradient.zip`
 
 1. Edit the `AirGradient` section of weewx.conf (which was created by the install
-   above).  AirGradient sensors are specified with section names of `Sensor1`,
+   above).
+
+   AirGradient sensors are specified with section names of `Sensor1`,
    `Sensor2`, `Sensor3`, etc.  Proxies are specified as `Proxy1`, `Proxy2`,
    `Proxy3`, etc.  There is no limit on how many sensors and proxies can
    be configured; but the numbering must be sonsecutive.  The order in which
@@ -92,9 +93,25 @@ If you don't meet the following requirements, don't install this extension.
    then the sensors, low numbers to high.  Once a proxy or sensor replies,
    no further proxies/sensors are interrogated for the current polling round.
 
+   The fields to write to Loop records are specified in the `LoopFields` section.
+   A good default is installed, but any field emitted by the AirGradient sensor
+   can be added here.  The right side of the equation specifies the name to
+   be used in the Loop record.  In the default, the pm and co2 Loop record field 
+   names are chosen to match what is in WeeWX's schema.  The tvoc and nox fields
+   are not in the schema, but adding them to the schema will be suggested below.
+
    ```
    [AirGradient]
        poll_secs = 15
+       [[LoopFields]]
+           pm01 = pm1_0
+           pm02Copmensateed = pm2_5
+           pm10 = pm10_0
+           rco2 = co2
+           tvocIndex = tvocIndex
+           tvocRaw = tvoc
+           noxIndex = noxIndex
+           noxRaw = nox
        [[Sensor]]
            enable = true
            hostname = airgradient
@@ -135,10 +152,10 @@ If you don't meet the following requirements, don't install this extension.
 
    `sudo systemctl stop weewx`
    `/home/weewx/weewx-venv/bin/activate`
+   `weectl database add-column tvoc --type=REAL`
    `weectl database add-column tvocIndex --type=REAL`
-   `weectl database add-column tvocRaw --type=REAL`
+   `weectl database add-column nox --type=REAL`
    `weectl database add-column noxIndex --type=REAL`
-   `weectl database add-column noxRaw --type=REAL`
    `sudo systemctl start weewx`
 
 1. If you are Unix/Linux savy, and are willing to work with a crude
