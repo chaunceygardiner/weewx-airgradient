@@ -371,7 +371,13 @@ class AirGradient(StdService):
                 for rec_field in self.cfg.loop_fields.keys():
                     if rec_field in reading_dict and reading_dict[rec_field] is not None:
                         log.debug('packet[%s] = %r' % (self.cfg.loop_fields[rec_field], reading_dict[rec_field]))
-                        event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
+                        if rec_field in ['atmp', 'atmpCompensated']:
+                            # temperature needs to match units in loop record
+                            temperature, _, _ = weewx.units.convertStd((reading_dict[rec_field], 'degree_C', 'group_temperature'), event.packet['usUnits'])
+                            event.packet[self.cfg.loop_fields[rec_field]] = temperature
+                        else:
+                            # Don't have to worry about units convesion.
+                            event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
             else:
                 log.error('Found no fresh reading to insert.')
 
