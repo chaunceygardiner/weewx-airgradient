@@ -166,13 +166,15 @@ If you don't meet the following requirements, don't install this extension.
    Performing this step will result in WeeWX including these fields in archive records so one will
    get highs, lows, averages, etc.  And one will be able to generate graphs.
 
-   `sudo systemctl stop weewx`
-   `/home/weewx/weewx-venv/bin/activate`
-   `weectl database add-column tvoc --type=REAL`
-   `weectl database add-column tvocIndex --type=REAL`
-   `weectl database add-column nox --type=REAL`
-   `weectl database add-column noxIndex --type=REAL`
-   `sudo systemctl start weewx`
+   ```
+   sudo systemctl stop weewx
+   /home/weewx/weewx-venv/bin/activate
+   weectl database add-column tvoc --type=REAL
+   weectl database add-column tvocIndex --type=REAL
+   weectl database add-column nox --type=REAL
+   weectl database add-column noxIndex --type=REAL
+   sudo systemctl start weewx
+   ```
 
 1. If you are Unix/Linux savy, and are willing to work with a crude
    installation procedure, install
