@@ -372,51 +372,6 @@ class AirGradient(StdService):
                     if rec_field in reading_dict and reading_dict[rec_field] is not None:
                         log.debug('packet[%s] = %r' % (self.cfg.loop_fields[rec_field], reading_dict[rec_field]))
                         event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
-                
-                #if 'pm2_5' in event.packet:
-                #    event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(event.packet['pm2_5'])
-                #if 'pm2_5_aqi' in event.packet:
-                #    event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
-
-                ## Insert pm1_0, pm2_5, pm10_0, aqi and aqic into loop packet.
-                #if self.cfg.reading.pm01 is not None:
-                #    event.packet['pm1_0'] = self.cfg.reading.pm01
-                #    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
-                #if self.cfg.reading.pm10 is not None:
-                #    event.packet['pm10_0'] = self.cfg.reading.pm10
-                #    log.debug('Inserted packet[pm10_0]: %f into packet.' % event.packet['pm10_0'])
-                #if self.cfg.reading.pm02Compensated is not None:
-                #    event.packet['pm2_5'] = self.cfg.reading.pm02Compensated
-                #    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
-                #elif self.cfg.reading.pm02 is not None:
-                #    event.packet['pm2_5'] = self.cfg.reading.pm02
-                #    log.debug('Inserted packet[pm1_0]: %f into packet.' % event.packet['pm1_0'])
-                #    log.debug('Inserted packet[pm2_5]: %f into packet.' % event.packet['pm2_5'])
-                #
-                #if 'pm2_5' in event.packet:
-                #    event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(event.packet['pm2_5'])
-                #if 'pm2_5_aqi' in event.packet:
-                #    event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
-                #
-                #if self.cfg.reading.rco2 is not None:
-                #    event.packet['co2'] = self.cfg.reading.rco2
-                #    log.debug('Inserted packet[co2]: %f into packet.' % event.packet['co2'])
-
-                #if self.cfg.reading.tvocIndex is not None:
-                #    event.packet['tvocIndex'] = self.cfg.reading.tvocIndex
-                #    log.debug('Inserted packet[tvocIndex]: %f into packet.' % event.packet['tvocIndex'])
-
-                #if self.cfg.reading.tvocRaw is not None:
-                #    event.packet['tvocRaw'] = self.cfg.reading.tvocRaw
-                #    log.debug('Inserted packet[tvocRaw]: %f into packet.' % event.packet['tvocRaw'])
-
-                #if self.cfg.reading.noxIndex is not None:
-                #    event.packet['noxIndex'] = self.cfg.reading.noxIndex
-                #    log.debug('Inserted packet[noxIndex]: %f into packet.' % event.packet['noxIndex'])
-
-                #if self.cfg.reading.noxRaw is not None:
-                #    event.packet['noxRaw'] = self.cfg.reading.noxRaw
-                #    log.debug('Inserted packet[noxRaw]: %f into packet.' % event.packet['noxRaw'])
             else:
                 log.error('Found no fresh reading to insert.')
 

@@ -1,6 +1,6 @@
 weewx-airgradient change history
 --------------------------------
 
-1.0 10/25/2025
+1.0 10/28/2025
 --------------
 Initial release of weewx-airgradient.
