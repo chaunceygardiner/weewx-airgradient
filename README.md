@@ -321,7 +321,7 @@ PM 2.5 and PM 10.0, simply set up your `weewx.conf` `AirGradient` section as fol
 
 In the above snippet, the AQI XType is turned off and `pm01`, `pmo2Compensated` and `pm10` are
 not written to Loop records.  With these settings, the pm values and the AQI are left to the
-other extenson you are runnnig [e.g., (weewx-purple](https://github.com/chaunceygardiner/weewx-purple))
+other extenson you are runnnig (e.g., (weewx-purple](https://github.com/chaunceygardiner/weewx-purple)))
 
 
 ## Licensing
