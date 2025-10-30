@@ -150,6 +150,7 @@ class Configuration:
     fresh_secs    : int               # Immutable
     loop_fields   : Dict[str, str]    # Immutable
     sources       : List[Source]      # Immutable
+    enable_aqi    : bool              # Immutable
 
 def datetime_from_reading(dt_str):
     # 2025-10-25T17:45:00.000Z
@@ -323,6 +324,8 @@ class AirGradient(StdService):
         poll_secs  = to_int(self.config_dict.get('poll_secs', 15))
         fresh_secs = max(120, 3 * poll_secs)
 
+        enable_aqi  = to_bool(self.config_dict.get('enable_aqi', True))
+
         self.cfg = Configuration(
             lock          = threading.Lock(),
             reading       = None,
@@ -330,10 +333,16 @@ class AirGradient(StdService):
             poll_secs     = poll_secs,
             fresh_secs    = fresh_secs,
             loop_fields   = AirGradient.configure_loop_fields(self.config_dict),
-            sources       = AirGradient.configure_sources(self.config_dict))
+            sources       = AirGradient.configure_sources(self.config_dict),
+            enable_aqi    = enable_aqi)
 
         log.info('poll_secs : %d' % self.cfg.poll_secs)
         log.info('fresh_secs: %d' % self.cfg.fresh_secs)
+        log.info('enable_aqi: %s' % self.cfg.enable_aqi)
+        loopfield_count: int = 0
+        for key in self.cfg.loop_fields:
+            loopfield_count += 1
+            log.info('LoopField %d: %s = %s' % (loopfield_count, key, self.cfg.loop_fields[key]))
         source_count = 0
         for source in self.cfg.sources:
             if source.enable:
@@ -345,7 +354,8 @@ class AirGradient(StdService):
         if source_count == 0:
             log.error('No sources configured for airgradient extension.  AirGradient extension is inoperable.')
         else:
-            weewx.xtypes.xtypes.insert(0, AQI())
+            if self.cfg.enable_aqi:
+                weewx.xtypes.xtypes.insert(0, AQI())
 
             with self.cfg.lock:
                 self.cfg.reading = get_reading(self.cfg)

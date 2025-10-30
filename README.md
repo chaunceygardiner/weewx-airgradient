@@ -39,6 +39,12 @@ is the [RGBint](https://www.shodor.org/stella2java/rgbint.html) value
 
 Note: The AQI index values conform to the [2024 EPA definition](https://www.epa.gov/system/files/documents/2024-02/pm-naaqs-air-quality-index-fact-sheet.pdf)
 
+If the user does not want the AQI XType, it can be turned off with the following line in the `AirGradient` section of `weewx.conf`:
+```
+[AirGradient]
+    enable_aqi = False
+```
+
 A skin is provided to show a sample report:
 ![AirGradientReport](AirGradientReport.jpg)
 
@@ -202,6 +208,11 @@ supported (e.g., the high PM2.5 for the week can be presented with `$week.pm2_5.
 To show the PM2.5 reading, use the following:
 ```
 $current.pm2_5
+```
+
+To show the maximum PM2.5 today, use the following:
+```
+$day.pm2_5.max
 ```
 
 To show the Air Quality Index:
