@@ -388,6 +388,16 @@ class AirGradient(StdService):
                         else:
                             # Don't have to worry about units convesion.
                             event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
+                if self.cfg.enable_aqi:
+                    # compute aqi from pm02Compensated if present, else pm02
+                    pm02: Optional[float] = None
+                    if self.cfg.reading.pm02Compensated is not None:
+                        pm02 = self.cfg.reading.pm02Compensated
+                    elif self.cfg.reading.pm02 is not None:
+                        pm02 = self.cfg.reading.pm02
+                    if pm02 is not None:
+                        event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(pm02)
+                        event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
             else:
                 log.error('Found no fresh reading to insert.')
 

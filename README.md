@@ -21,13 +21,11 @@ extension, in the suggested setup, Loop records will be populated with `pm1_0`, 
 correspond to AirGradient's `pm01`, `pm02Compensated`, `pm10` `rco2`, `noxRaw`, `noxIndex`,
 `tvocRaw` and `tvocIndex` fields.
 
-As mentioned above, in the suggested setup, weewx-airgradient inserts `tvoc`, `tvocIndex`, `nox` and `noxIndex'.
+As mentioned above, in the suggested setup, weewx-airgradient inserts `tvoc`, `tvocIndex`, `nox` and `noxIndex`.
 These fields are accessible in the current loop record with the `.current` syntax.  If one wishes to
-have these fields saved in archive records, one will need to add these columns to the schema.
-
-In addition to `pm1_0`, `pm2_5` `pm10_0` and `co2`; the fields`tvoc`, `tvocIndex`, `nox` and `noxIndex`
-are available (even if you havent added those columns to the database.  (Although, if not added, they are
-only available as `.current` values.
+have these fields saved in archive records, one will need to add these columns to the database.  This will
+then make availble the full range of access to these fields (e.g., `day.nox.avg`).  The installation
+instructions sugges the appropriate fields to add to the database.
 
 In addition, AQI variables are also available (even though they are not in the
 database) via WeeWX's [XTypes](https://github.com/weewx/weewx/wiki/WeeWX-V4-user-defined-types).
@@ -39,14 +37,52 @@ is the [RGBint](https://www.shodor.org/stella2java/rgbint.html) value
 
 Note: The AQI index values conform to the [2024 EPA definition](https://www.epa.gov/system/files/documents/2024-02/pm-naaqs-air-quality-index-fact-sheet.pdf)
 
-If the user does not want the AQI XType, it can be turned off with the following line in the `AirGradient` section of `weewx.conf`:
+If the user does not want the AQI XType fields (`pm2_5_aqi` and `pm2_5_aqi_color`), it can be turned off with the following line in the `AirGradient` section of `weewx.conf`:
 ```
 [AirGradient]
     enable_aqi = False
 ```
 
 A skin is provided to show a sample report:
-![AirGradientReport](AirGradientReport.jpg)
+![AirGradientReport](AirGradientReport.png)
+
+### Full List of Fields that are Avaiable to Add to Loop Records
+
+Here's a full list of fields emitted by an AirGradient sensor.  Any or all of them can be added to Loop records with the appropriate
+entries in the `[LoopFields]' section os `weewx.conf`'s `[AirGradient]` section.
+
+```
+    serialno        :  Serial Number of the monitor
+    wifi            :  WiFi signal strength
+    pm01            :  PM1.0 in ug/m3 (atmospheric environment)
+    pm02            :  PM2.5 in ug/m3 (atmospheric environment)
+    pm10            :  PM10 in ug/m3 (atmospheric environment)
+    pm02Compensated :  PM2.5 in ug/m3 with correction applied (from fw version 3.1.4 onwards)
+    pm01Standard    :  PM1.0 in ug/m3 (standard particle)
+    pm02Standard    :  PM2.5 in ug/m3 (standard particle)
+    pm10Standard    :  PM10 in ug/m3 (standard particle)
+    rco2            :  CO2 in ppm
+    pm003Count      :  Particle count 0.3um per dL
+    pm005Count      :  Particle count 0.5um per dL
+    pm01Count       :  Particle count 1.0um per dL
+    pm02Count       :  Particle count 2.5um per dL
+    pm50Count       :  Particle count 5.0um per dL **Only aviable with the AirGradient Now**
+    pm10Count       :  Particle count 10um per dL **Only aviable with the AirGradient Now**
+    atmp            :  Temperature in Degrees Celsius **Will be converted to match units of Loop record.**
+    atmpCompensated :  Temperature in Degrees Celsius with correction applied **Will be converted to match units of Loop record.**
+    rhum            :  Relative Humidity
+    rhumCompensated :  Relative Humidity with correction applied
+    tvocIndex       :  Senisiron VOC Index
+    tvocRaw         :  VOC raw value
+    noxIndex        :  Senisirion NOx Index
+    noxRaw          :  NOx raw value
+    boot            :  Counts every measurement cycle. Low boot counts indicate restarts.
+    bootCount       :  Same as boot property. Required for Home Assistant compatability. (deprecated soon!)
+    ledMode         :  Current configuration of the LED mode **Only aviable with the AirGradient Now**
+    firmware        :  Current firmware version
+    model           :  Current model name
+```
+
 
 ### What's an airgradient-proxy?
 
@@ -261,7 +297,30 @@ $current.tvoc
 To show the TVOC Index reading, use the following:
 ```
 $current.tvocIndex
+
+## Having AirGradient's Extra Air Quality Sensors is Great, but I'm Already Running a PurpleAir Extension!
+
+The author of this extension is in the same boat.  If you want to keep PurpleAir readings for PM 1.0,
+PM 2.5 and PM 10.0, simply set up your `weewx.conf` `AirGradient` section as follows:
+
 ```
+[AirGradient]
+    enable_aqi = False
+    [[LoopFields]]
+        rco2 = co2
+        tvocIndex = tvocIndex
+        tvocRaw = tvoc
+        noxIndex = noxIndex
+        noxRaw = nox
+    .
+    .
+    .
+```
+
+In the above snippet, the AQI XType is turned off and `pm01`, `pmo2Compensated` and `pm10` are
+not written to Loop records.  With these settings, the pm values and the AQI are left to the
+other extenson you are runnnig [e.g., (weewx-purple](https://github.com/chaunceygardiner/weewx-purple))
+
 
 ## Licensing
 
