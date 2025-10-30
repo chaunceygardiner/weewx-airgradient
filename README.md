@@ -25,7 +25,7 @@ As mentioned above, in the suggested setup, weewx-airgradient inserts `tvoc`, `t
 These fields are accessible in the current loop record with the `.current` syntax.  If one wishes to
 have these fields saved in archive records, one will need to add these columns to the database.  This will
 then make availble the full range of access to these fields (e.g., `day.nox.avg`).  The installation
-instructions sugges the appropriate fields to add to the database.
+instructions suggest the appropriate fields to add to the database.
 
 In addition, AQI variables are also available (even though they are not in the
 database) via WeeWX's [XTypes](https://github.com/weewx/weewx/wiki/WeeWX-V4-user-defined-types).
@@ -49,7 +49,7 @@ A skin is provided to show a sample report:
 ### Full List of Fields that are Avaiable to Add to Loop Records
 
 Here's a full list of fields emitted by an AirGradient sensor.  Any or all of them can be added to Loop records with the appropriate
-entries in the `[LoopFields]' section os `weewx.conf`'s `[AirGradient]` section.
+entries in the `[LoopFields]` section of `weewx.conf`'s `[AirGradient]` section.
 
 ```
     serialno        :  Serial Number of the monitor
@@ -218,7 +218,7 @@ If you don't meet the following requirements, don't install this extension.
    sudo systemctl start weewx
    ```
 
-1. If you are Unix/Linux savy, and are willing to work with a crude
+1. If you are Unix/Linux savvy, and are willing to work with a crude
    installation procedure, install
    [airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy).
 
@@ -227,7 +227,7 @@ If you don't meet the following requirements, don't install this extension.
 1. To check for a successful install, wait for a reporting cycle, then
    navigate in a browser to the WeeWX site and add /airgradient to the end
    of the URL (e.g., http://weewx-machine/weewx/airgradient).
-   The PM2.5 and AQI graphs will fill in over time.
+   The graphs will fill in over time.
 
 ## WeeWX 4 Installation Instructions (installing in WeeWX 4 is not supported by the author)
 
@@ -297,6 +297,8 @@ $current.tvoc
 To show the TVOC Index reading, use the following:
 ```
 $current.tvocIndex
+```
+
 
 ## Having AirGradient's Extra Air Quality Sensors is Great, but I'm Already Running a PurpleAir Extension!
 
