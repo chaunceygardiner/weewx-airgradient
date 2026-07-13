@@ -1,6 +1,13 @@
 weewx-airgradient change history
 --------------------------------
 
+1.1 07/12/2026
+--------------
+- WeeWX could fail to shut down if it received SIGTERM while the
+  AirGradient extension was fetching its startup sensor reading (the
+  fetch's error handling swallowed the shutdown request).  Shutdown now
+  always passes through.
+
 1.0 10/30/2025
 --------------
 Initial release of weewx-airgradient.
