@@ -37,6 +37,7 @@ from dateutil.parser import ParserError
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import weeutil.logger
 import weeutil.weeutil
 import weewx
 import weewx.units
@@ -50,7 +51,7 @@ from weewx.engine import StdService
 
 log = logging.getLogger(__name__)
 
-WEEWX_AIRGRADIENT_VERSION = "1.1"
+WEEWX_AIRGRADIENT_VERSION = "2.0"
 
 if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 9):
     raise weewx.UnsupportedFeature(
@@ -103,7 +104,7 @@ class Source:
         self.enable = to_bool(source_dict.get('enable', False))
         self.hostname = source_dict.get('hostname', '')
         if is_proxy:
-            self.port = to_int(source_dict.get('port', 8000))
+            self.port = to_int(source_dict.get('port', 8080))
         else:
             self.port = to_int(source_dict.get('port', 80))
         self.timeout  = to_int(source_dict.get('timeout', 10))
@@ -131,9 +132,9 @@ class Reading:
     atmpCompensated : Optional[float] # Temperature in Degrees Celsius with correction applied
     rhum            : Optional[float] # Relative Humidity
     rhumCompensated : Optional[float] # Relative Humidity with correction applied
-    tvocIndex       : Optional[float] # Senisiron VOC Index
+    tvocIndex       : Optional[float] # Sensirion VOC Index
     tvocRaw         : Optional[float] # VOC raw value
-    noxIndex        : Optional[float] # Senisirion NOx Index
+    noxIndex        : Optional[float] # Sensirion NOx Index
     noxRaw          : Optional[float] # NOx raw value
     boot            : Optional[int  ] # Counts every measurement cycle. Low boot counts indicate restarts.
     bootCount       : Optional[int  ] # Same as boot property. Required for Home Assistant compatability. (deprecated soon!)
@@ -145,7 +146,6 @@ class Reading:
 class Configuration:
     lock          : threading.Lock
     reading       : Optional[Reading] # Controlled by lock
-    archive_delay : int               # Immutable
     poll_secs     : int               # Immutable
     fresh_secs    : int               # Immutable
     loop_fields   : Dict[str, str]    # Immutable
@@ -181,10 +181,10 @@ def get_reading(cfg: Configuration):
             if reading is not None:
                 log.debug('get_reading: source: %s' % reading)
                 age_of_reading = time.time() - reading.measurementTime.timestamp()
-                # Ignore old readings.  We can't reading of fresh_secs or close to
-                # it because the reading will age before the next time
-                # a reading is polled.  Reduce fresh_secs - poll_secs by
-                # 5s (as a buffer).
+                # Ignore old readings.  We can't accept a reading of age
+                # fresh_secs (or close to it) because the reading will age
+                # out before the next poll.  Reduce fresh_secs - poll_secs
+                # by 5s (as a buffer).
                 if abs(age_of_reading) > (cfg.fresh_secs - cfg.poll_secs - 5.0):
                     log.info('Ignoring reading from %s:%d--age: %d seconds.' % (
                         source.hostname, source.port, age_of_reading))
@@ -195,22 +195,19 @@ def get_reading(cfg: Configuration):
     return None
 
 def check_type(j: Dict[str, Any], types: List[Type], names: List[str]) -> Tuple[bool, str]:
+    """Check that each named field in j, if present and non-null, is an
+    instance of one of types.  All fields are optional (AirGradient models
+    differ in which fields they report) and JSON null is acceptable.  bool
+    is never acceptable (JSON true/false parse as bool, a subclass of
+    int)."""
     try:
         for name in names:
-            try:
-                if name in j:
-                    x = j[name]
-                    if x is not None:
-                        match_found = False
-                        for t in types:
-                            if isinstance(x, t):
-                                match_found = True
-                                break
-                        if not match_found:
-                            return False, '%s is not an instance of any of the following type(s): %r: %s' % (name, types, j[name])
-            except KeyError:
-                # All columns are optional
-                pass
+            x = j.get(name)
+            if x is None:
+                continue
+            match_found = not isinstance(x, bool) and any(isinstance(x, t) for t in types)
+            if not match_found:
+                return False, '%s is not an instance of any of the following type(s): %r: %s' % (name, types, x)
         return True, ''
     except Exception as e:
         reraise_if_terminate(e)
@@ -222,19 +219,12 @@ def is_sane(j: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     if not ok:
         return False, reason
 
-    if 'measurementTime' in j:
+    if j.get('measurementTime') is not None:
         try:
-            ok, reason = check_type(j, [str], ['measurementTime'])
-            if not ok:
-                return False, reason
             _ = datetime_from_reading(j['measurementTime'])
         except ParserError:
             return False, 'measurementTime could not be converted to a dateTime: %s' % j['measurementTime']
 
-    ok, reason = check_type(j, [str], ['serialno','ledMode','firmware', 'model'])
-    if not ok:
-        return False, reason
- 
     ok, reason = check_type(j, [int], ['boot', 'bootCount'])
     if not ok:
         return False, reason
@@ -249,6 +239,10 @@ def is_sane(j: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 
     return True, None
 
+def opt_float(j: Dict[str, Any], name: str) -> Optional[float]:
+    """A field that is absent or JSON null yields None."""
+    return float(j[name]) if j.get(name) is not None else None
+
 def parse_response(hostname: str, response: requests.Response) -> Optional[Reading]:
     try:
         # convert to json
@@ -259,10 +253,10 @@ def parse_response(hostname: str, response: requests.Response) -> Optional[Readi
             log.info('airgradient reading from %s not sane, %s: %s' % (hostname, reason, j))
             return None
 
-        # if json contains 'measurementTime', the reading is from an airgradientproxy.
+        # if json contains 'measurementTime', the reading is from an airgradient-proxy.
         # if missing, the reading is directly from an AirGradient sensor.  For the
         # latter case, the measurementTime is now.
-        if 'measurementTime' in j:
+        if j.get('measurementTime') is not None:
             measurementTime = datetime_from_reading(j['measurementTime'])
         else:
             measurementTime = utc_now()
@@ -270,34 +264,34 @@ def parse_response(hostname: str, response: requests.Response) -> Optional[Readi
         return Reading(
             measurementTime = measurementTime,
             serialno        = j['serialno'],
-            wifi            = float(j['wifi']) if 'wifi' in j else None,
-            pm01            = float(j['pm01']) if 'pm01' in j else None,
-            pm02            = float(j['pm02']) if 'pm02' in j else None,
-            pm10            = float(j['pm10']) if 'pm10' in j else None,
-            pm02Compensated = float(j['pm02Compensated']) if 'pm02Compensated' in j else None,
-            pm01Standard    = float(j['pm01Standard']) if 'pm01Standard' in j else None,
-            pm02Standard    = float(j['pm02Standard']) if 'pm02Standard' in j else None,
-            pm10Standard    = float(j['pm10Standard']) if 'pm10Standard' in j else None,
-            rco2            = float(j['rco2']) if 'rco2' in j else None,
-            pm003Count      = float(j['pm003Count']) if 'pm003Count' in j else None,
-            pm005Count      = float(j['pm005Count']) if 'pm005Count' in j else None,
-            pm01Count       = float(j['pm01Count']) if 'pm01Count' in j else None,
-            pm02Count       = float(j['pm02Count']) if 'pm02Count' in j else None,
-            pm50Count       = float(j['pm50Count']) if 'pm50Count' in j else None,
-            pm10Count       = float(j['pm10Count']) if 'pm10Count' in j else None,
-            atmp            = float(j['atmp']) if 'atmp' in j else None,
-            atmpCompensated = float(j['atmpCompensated']) if 'atmpCompensated' in j else None,
-            rhum            = float(j['rhum']) if 'rhum' in j else None,
-            rhumCompensated = float(j['rhumCompensated']) if 'rhumCompensated' in j else None,
-            tvocIndex       = float(j['tvocIndex']) if 'tvocIndex' in j else None,
-            tvocRaw         = float(j['tvocRaw']) if 'tvocRaw' in j else None,
-            noxIndex        = float(j['noxIndex']) if 'noxIndex' in j else None,
-            noxRaw          = float(j['noxRaw']) if 'noxRaw' in j else None,
-            boot            = j['boot'] if 'boot' in j else None,
-            bootCount       = j['bootCount'] if 'bootCount' in j else None,
-            ledMode         = j['ledMode'] if 'ledMode' in j else None,
-            firmware        = j['firmware'] if 'firmware' in j else None,
-            model           = j['model'] if 'model' in j else None)
+            wifi            = opt_float(j, 'wifi'),
+            pm01            = opt_float(j, 'pm01'),
+            pm02            = opt_float(j, 'pm02'),
+            pm10            = opt_float(j, 'pm10'),
+            pm02Compensated = opt_float(j, 'pm02Compensated'),
+            pm01Standard    = opt_float(j, 'pm01Standard'),
+            pm02Standard    = opt_float(j, 'pm02Standard'),
+            pm10Standard    = opt_float(j, 'pm10Standard'),
+            rco2            = opt_float(j, 'rco2'),
+            pm003Count      = opt_float(j, 'pm003Count'),
+            pm005Count      = opt_float(j, 'pm005Count'),
+            pm01Count       = opt_float(j, 'pm01Count'),
+            pm02Count       = opt_float(j, 'pm02Count'),
+            pm50Count       = opt_float(j, 'pm50Count'),
+            pm10Count       = opt_float(j, 'pm10Count'),
+            atmp            = opt_float(j, 'atmp'),
+            atmpCompensated = opt_float(j, 'atmpCompensated'),
+            rhum            = opt_float(j, 'rhum'),
+            rhumCompensated = opt_float(j, 'rhumCompensated'),
+            tvocIndex       = opt_float(j, 'tvocIndex'),
+            tvocRaw         = opt_float(j, 'tvocRaw'),
+            noxIndex        = opt_float(j, 'noxIndex'),
+            noxRaw          = opt_float(j, 'noxRaw'),
+            boot            = j.get('boot'),
+            bootCount       = j.get('bootCount'),
+            ledMode         = j.get('ledMode'),
+            firmware        = j.get('firmware'),
+            model           = j.get('model'))
     except Exception as e:
         log.info('parse_response: %r raised exception %r' % (response.text, e))
         raise e
@@ -332,6 +326,7 @@ class AirGradient(StdService):
 
         self.engine = engine
         self.config_dict = config_dict.get('AirGradient', {})
+        self.stale_logged = False
 
         poll_secs  = to_int(self.config_dict.get('poll_secs', 15))
         fresh_secs = max(120, 3 * poll_secs)
@@ -341,7 +336,6 @@ class AirGradient(StdService):
         self.cfg = Configuration(
             lock          = threading.Lock(),
             reading       = None,
-            archive_delay = to_int(config_dict['StdArchive'].get('archive_delay', 15)),
             poll_secs     = poll_secs,
             fresh_secs    = fresh_secs,
             loop_fields   = AirGradient.configure_loop_fields(self.config_dict),
@@ -374,9 +368,7 @@ class AirGradient(StdService):
 
             # Start a thread to query proxies and make aqi available to loopdata
             dp: DevicePoller = DevicePoller(self.cfg)
-            t: threading.Thread = threading.Thread(target=dp.poll_device)
-            t.setName('AirGradient')
-            t.setDaemon(True)
+            t: threading.Thread = threading.Thread(target=dp.poll_device, name='AirGradient', daemon=True)
             t.start()
 
             self.bind(weewx.NEW_LOOP_PACKET, self.new_loop_packet)
@@ -387,6 +379,9 @@ class AirGradient(StdService):
             log.debug('new_loop_packet: self.cfg.reading: %s' % self.cfg.reading)
             if self.cfg.reading is not None and \
                     self.cfg.reading.measurementTime.timestamp() + self.cfg.fresh_secs >= time.time():
+                if self.stale_logged:
+                    log.info('Fresh reading available again.')
+                    self.stale_logged = False
                 log.debug('Time of reading being inserted: %s' % timestamp_to_string(self.cfg.reading.measurementTime.timestamp()))
 
                 reading_dict = self.cfg.reading.__dict__
@@ -398,7 +393,7 @@ class AirGradient(StdService):
                             temperature, _, _ = weewx.units.convertStd((reading_dict[rec_field], 'degree_C', 'group_temperature'), event.packet['usUnits'])
                             event.packet[self.cfg.loop_fields[rec_field]] = temperature
                         else:
-                            # Don't have to worry about units convesion.
+                            # Don't have to worry about units conversion.
                             event.packet[self.cfg.loop_fields[rec_field]] = reading_dict[rec_field]
                 if self.cfg.enable_aqi:
                     # compute aqi from pm02Compensated if present, else pm02
@@ -411,25 +406,31 @@ class AirGradient(StdService):
                         event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(pm02)
                         event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
             else:
-                log.error('Found no fresh reading to insert.')
+                # Log at error level once per outage, not once per loop packet.
+                if not self.stale_logged:
+                    log.error('Found no fresh reading to insert.')
+                    self.stale_logged = True
+                else:
+                    log.debug('Found no fresh reading to insert.')
 
+    @staticmethod
     def configure_loop_fields(config_dict):
         loop_fields = {}
-        try:
-            # Raise KeyEror if 'LoopFields' not in config_dict.
-            loop_fields_dict = config_dict['LoopFields']
-            for key in loop_fields_dict:
-                if not isinstance(key, str):
-                    log.info('keys in LoopFields must be strings that corresspond to AirGradient fields, skipping this entry: %s' % key)
-                elif not isinstance(loop_fields_dict[key], str):
-                    log.info('values in LoopFields must be strings that corresspond to Loop record fields, skipping this entry: %s' % key)
-                else:
-                    loop_fields[key] = loop_fields_dict[key]
-        except KeyError:
-            log.info("No LoopFields section in weewx.conf's AirGradient section, no fields will be written to Loop records")
-
+        loop_fields_dict = config_dict.get('LoopFields', {})
+        for key in loop_fields_dict:
+            if not isinstance(key, str):
+                log.info('keys in LoopFields must be strings that correspond to AirGradient fields, skipping this entry: %s' % key)
+            elif not isinstance(loop_fields_dict[key], str):
+                log.info('values in LoopFields must be strings that correspond to Loop record fields, skipping this entry: %s' % key)
+            else:
+                loop_fields[key] = loop_fields_dict[key]
+        if not loop_fields:
+            log.error("No [LoopFields] entries in weewx.conf's [AirGradient] section: "
+                      "no fields will be written to loop packets.  See the README for "
+                      "the suggested mapping.")
         return loop_fields
 
+    @staticmethod
     def configure_sources(config_dict):
         sources = []
         # Configure Proxies
@@ -452,50 +453,6 @@ class AirGradient(StdService):
                 break
 
         return sources
-
-    def get_proxy_version(hostname, port, timeout):
-        try:
-            url = 'http://%s:%s/get-version' % (hostname, port)
-            log.debug('get-proxy-version: url: %s' % url)
-            # If the machine was just rebooted, a temporary failure in name
-            # resolution is likely.  As such, try three times.
-            for i in range(3):
-                try:
-                    r = requests.get(url=url, timeout=timeout)
-                    r.raise_for_status()
-                    break
-                except requests.exceptions.ConnectionError as e:
-                    if i < 2:
-                        log.info('%s: Retrying.' % e)
-                        time.sleep(5)
-                    else:
-                        raise e
-            log.debug('get-proxy-version: r: %s' % r)
-            if r is None:
-                log.debug('get-proxy-version: request returned None')
-                return None
-            j = r.json()
-            log.debug('get_proxy_version: returning version %s for %s.' % (j['version'], hostname))
-            return j['version']
-        except Exception as e:
-            log.info('Could not get version from proxy %s: %s.  Down?' % (hostname, e))
-            return None
-
-    def get_earliest_timestamp(hostname, port, timeout):
-        try:
-            url = 'http://%s:%s/get-earliest-timestamp' % (hostname, port)
-            r = requests.get(url=url, timeout=timeout)
-            r.raise_for_status()
-            log.debug('get-earliest-timestamp: r: %s' % r)
-            if r is None:
-                log.debug('get-earliest-timestamp: request returned None')
-                return None
-            j = r.json()
-            log.debug('get_earliest_timestamp: returning earliest timestamp %s for %s.' % (j['timestamp'], hostname))
-            return j['timestamp']
-        except Exception as e:
-            log.debug('Could not get earliest timestamp from proxy %s: %s.  Down?' % (hostname, e))
-            return None
 
 class DevicePoller:
     def __init__(self, cfg: Configuration):
@@ -532,20 +489,18 @@ class AQI(weewx.xtypes.XType):
                "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL",
         'count': "SELECT COUNT(dateTime), MIN(usUnits) FROM %(table_name)s "
                  "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL",
-        'first': "SELECT pm2_5, MIN(usUnits) FROM %(table_name)s "
+        'first': "SELECT pm2_5, usUnits FROM %(table_name)s "
                  "WHERE dateTime = (SELECT MIN(dateTime) FROM %(table_name)s "
-                 "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL",
-        'last': "SELECT pm2_5, MIN(usUnits) FROM %(table_name)s "
+                 "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL)",
+        'last': "SELECT pm2_5, usUnits FROM %(table_name)s "
                 "WHERE dateTime = (SELECT MAX(dateTime) FROM %(table_name)s "
-                "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL",
-        'min': "SELECT pm2_5, MIN(usUnits) FROM %(table_name)s "
+                "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL)",
+        'min': "SELECT pm2_5, usUnits FROM %(table_name)s "
                "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL "
                "ORDER BY pm2_5 ASC LIMIT 1;",
-        'max': "SELECT pm2_5, MIN(usUnits) FROM %(table_name)s "
+        'max': "SELECT pm2_5, usUnits FROM %(table_name)s "
                "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL "
                "ORDER BY pm2_5 DESC LIMIT 1;",
-        'sum': "SELECT SUM(pm2_5), MIN(usUnits) FROM %(table_name)s "
-               "WHERE dateTime > %(start)s AND dateTime <= %(stop)s AND pm2_5 IS NOT NULL)",
     }
 
     day_boundary_avg_min_max_sql_dict = {
@@ -570,24 +525,32 @@ class AQI(weewx.xtypes.XType):
         # USG            101 - 150   35.5 -  55.4
         # Unhealthy      151 - 200   55.5 - 125.4
         # Very Unhealthy 201 - 300  125.5 - 225.4
-        # Hazardous      301 - 500  225.5 and above
+        # Hazardous      301 - 500  225.5 - 325.4
+        #
+        # Concentrations above 325.4 map to AQI values above 500, continuing
+        # on the Hazardous slope (May 2024 AirNow TAD, breakpoint-table
+        # footnote 4 and the "AQI values above 500" FAQ).
 
         # The EPA standard for AQI says to truncate PM2.5 to one decimal place.
         # See https://www3.epa.gov/airnow/aqi-technical-assistance-document-sept2018.pdf
         x = math.trunc(pm2_5 * 10) / 10
 
         if x <= 9.0: # Good
-            return round(x / 9.0 * 50)
+            aqi = round(x / 9.0 * 50)
         elif x <= 35.4: # Moderate
-            return round((x - 9.1) / 26.3 * 49.0 + 51.0)
-        elif x <= 55.4: # Unhealthy for senstive
-            return round((x - 35.5) / 19.9 * 49.0 + 101.0)
+            aqi = round((x - 9.1) / 26.3 * 49.0 + 51.0)
+        elif x <= 55.4: # Unhealthy for sensitive groups
+            aqi = round((x - 35.5) / 19.9 * 49.0 + 101.0)
         elif x <= 125.4: # Unhealthy
-            return round((x - 55.5) / 69.9 * 49.0 + 151.0)
+            aqi = round((x - 55.5) / 69.9 * 49.0 + 151.0)
         elif x <= 225.4: # Very Unhealthy
-            return round((x - 125.5) / 99.9 * 99.0 + 201.0)
+            aqi = round((x - 125.5) / 99.9 * 99.0 + 201.0)
         else: # Hazardous
-            return round((x - 225.5) / 199.9 * 199.0 + 301.0)
+            aqi = round((x - 225.5) / 99.9 * 199.0 + 301.0)
+
+        # A negative pm2_5 (only possible if a bogus value reached the
+        # database by some other means) must not map below zero.
+        return max(0, aqi)
 
     @staticmethod
     def compute_pm2_5_aqi_color(pm2_5_aqi):
@@ -628,7 +591,7 @@ class AQI(weewx.xtypes.XType):
             pm2_5 = record['pm2_5']
             if obs_type == 'pm2_5_aqi':
                 value = AQI.compute_pm2_5_aqi(pm2_5)
-            if obs_type == 'pm2_5_aqi_color':
+            else: # pm2_5_aqi_color
                 value = AQI.compute_pm2_5_aqi_color(AQI.compute_pm2_5_aqi(pm2_5))
             t, g = weewx.units.getStandardUnitType(record['usUnits'], obs_type)
             # Form the ValueTuple and return it:
@@ -677,7 +640,7 @@ class AQI(weewx.xtypes.XType):
 
                 if obs_type == 'pm2_5_aqi':
                     value = AQI.compute_pm2_5_aqi(pm2_5)
-                if obs_type == 'pm2_5_aqi_color':
+                else: # pm2_5_aqi_color
                     value = AQI.compute_pm2_5_aqi_color(AQI.compute_pm2_5_aqi(pm2_5))
                 log.debug('get_series(%s): %s - %s - %s' % (obs_type,
                     timestamp_to_string(ts - interval * 60),
@@ -704,8 +667,10 @@ class AQI(weewx.xtypes.XType):
         be done.
 
         aggregate_type: The type of aggregation to be done. For this function, must be 'avg',
-        'sum', 'count', 'first', 'last', 'min', or 'max'. Anything else will cause
-        weewx.UnknownAggregation to be raised.
+        'count', 'first', 'last', 'min', or 'max'. Anything else will cause
+        weewx.UnknownAggregation to be raised.  ('sum' is deliberately not
+        supported: the AQI of summed concentrations is not a meaningful
+        quantity.)
 
         db_manager: An instance of weewx.manager.Manager or subclass.
 
@@ -734,8 +699,15 @@ class AQI(weewx.xtypes.XType):
             'pm2_5_summary_suffix': '_day_pm2_5'
         }
 
-        on_day_boundary = (timespan.stop - timespan.start) % (24 * 3600) == 0
-        log.debug('day_boundary stop: %r start: %r delta: %r modulo: %d on_day_boundary: %s' % (timespan.stop , timespan.start, (timespan.stop - timespan.start), ((timespan.stop - timespan.start) % 3600), on_day_boundary))
+        # The daily summary table can only be used if the timespan covers
+        # whole archive days: both endpoints on local midnight.  A span
+        # whose length merely happens to be a multiple of 24 hours (e.g.,
+        # a trailing 24-hour window) must use the regular archive table.
+        on_day_boundary = (timespan.start != timespan.stop
+                           and weeutil.weeutil.isStartOfDay(timespan.start)
+                           and weeutil.weeutil.isStartOfDay(timespan.stop))
+        log.debug('day_boundary start: %r stop: %r on_day_boundary: %s' % (
+            timespan.start, timespan.stop, on_day_boundary))
         if aggregate_type in list(AQI.day_boundary_avg_min_max_sql_dict.keys()) and on_day_boundary:
             select_stmt = AQI.day_boundary_avg_min_max_sql_dict[aggregate_type] % interpolation_dict
             select_usunits_stmt = AQI.day_boundary_avg_min_max_sql_dict['usUnits'] % interpolation_dict
@@ -759,10 +731,12 @@ class AQI(weewx.xtypes.XType):
             value = None
             std_unit_system = None
 
-        if value is not None:
+        # A count is a count of records; every other aggregate is a pm2_5
+        # concentration that must be converted to an AQI (or color).
+        if value is not None and aggregate_type != 'count':
             if obs_type == 'pm2_5_aqi':
                 value = AQI.compute_pm2_5_aqi(value)
-            if obs_type == 'pm2_5_aqi_color':
+            else: # pm2_5_aqi_color
                 value = AQI.compute_pm2_5_aqi_color(AQI.compute_pm2_5_aqi(value))
         t, g = weewx.units.getStandardUnitType(std_unit_system, obs_type, aggregate_type)
         # Form the ValueTuple and return it:

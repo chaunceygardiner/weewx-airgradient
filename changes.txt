@@ -1,6 +1,70 @@
 weewx-airgradient change history
 --------------------------------
 
+2.0 07/18/2026
+--------------
+Action required: none for typical installs.  If a report used
+$span.pm2_5_aqi.sum, remove it (see below).
+
+- The 'min' and 'max' aggregates of pm2_5_aqi/pm2_5_aqi_color returned the
+  AQI of an arbitrary reading instead of the minimum/maximum: the SQL
+  selected an aggregate (MIN(usUnits)) alongside pm2_5, which collapses
+  the query to a single arbitrary row.  Fixed.
+- The 'first' and 'last' aggregates of pm2_5_aqi/pm2_5_aqi_color produced
+  invalid SQL and always failed.  Fixed.
+- The 'count' aggregate of pm2_5_aqi returned the AQI *of the record count*
+  rather than the count.  It now returns the count.
+- The 'sum' aggregate of pm2_5_aqi is no longer accepted: the AQI of summed
+  concentrations is not a meaningful quantity.  (Its SQL was invalid anyway,
+  so it never actually worked.)
+- Aggregates over a timespan whose length is a multiple of 24 hours (e.g.,
+  a trailing 24-hour window) wrongly took the daily-summary fast path even
+  when the span did not start at local midnight, silently including data
+  from outside the span.  The fast path now requires both endpoints on
+  local midnight.
+- The Hazardous-category AQI slope was wrong: the code anchored AQI 500 at
+  425.4 ug/m^3, but the EPA definition anchors it at 325.4 (May 2024 AirNow
+  Technical Assistance Document, breakpoint-table footnote 4).  Hazardous
+  AQIs were understated by up to ~100 points: 250 ug/m^3 is AQI 350 (was
+  reported as 325); 325.4 ug/m^3 is AQI 500 (was reported as 400).
+  As in prior releases, AQI values above 500 continue on the same slope
+  (per the TAD); with the corrected anchor they begin at 325.4 ug/m^3
+  rather than 425.4.  Because AQI is computed on demand from stored pm2_5,
+  history in the Hazardous range will re-render with the corrected, higher
+  values.  (Same fix as weewx-purple 5.0.)
+- The built-in default port for proxy sources was 8000 (inherited from
+  weewx-purple), but airgradient-proxy listens on 8080.  The default is
+  now 8080.  This only matters if the port line was removed from a
+  [[ProxyN]] section (the installer always writes it explicitly) -- and in
+  that case the old default never worked anyway.
+- A JSON null in a sensor reading crashed the parse (the sanity check
+  deliberately accepts null, but the parser then attempted float(None)),
+  discarding the whole reading.  Null fields now simply yield no value.
+- Sanity checks now reject JSON booleans where numbers are expected
+  (JSON true/false parse as bool, a subclass of int, and previously
+  slipped through).
+- Log spam eliminated when a monitor goes down.  "Found no fresh reading
+  to insert" is logged once per outage instead of on every loop packet
+  (i.e., every couple of seconds), and recovery is logged.
+- The extension now logs an error at startup when [LoopFields] has no
+  entries.  Previously a new install that skipped the mapping step wrote
+  nothing to loop packets with barely a peep in the log, and appeared
+  broken.  (The installer still writes the section empty on purpose:
+  prefilling it is unsafe because weectl merges installer defaults into
+  an existing [AirGradient] section on upgrade, which would inject pm
+  mappings into configs that deliberately omit them -- e.g., when running
+  alongside weewx-purple.)
+- Test coverage went from 3 tests to 91, at 96% of lines and branches;
+  the tests moved to tests/ at the repo root.  All tests are hermetic (no
+  monitor or network needed), and the aggregation SQL executes against a
+  real database in the tests, so the SQL bugs fixed in this release can't
+  silently come back.
+- Removed dead code: get_proxy_version and get_earliest_timestamp (never
+  called) and the unused archive_delay configuration read.
+- README rewritten, fixing config examples that made a copy-pasted config
+  silently inoperable ([[Sensor]] instead of [[Sensor1]], a misspelled
+  pm02Compensated, and a starup_timeout option that does not exist).
+
 1.1 07/12/2026
 --------------
 - WeeWX could fail to shut down if it received SIGTERM while the

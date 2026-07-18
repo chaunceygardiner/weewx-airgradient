@@ -32,9 +32,9 @@ def loader():
 class AirGradientInstaller(ExtensionInstaller):
     def __init__(self):
         super(AirGradientInstaller, self).__init__(
-            version="1.1",
+            version="2.0",
             name='airgradient',
-            description='Record air quality via airgradient-proxy service.',
+            description='Record air quality readings from AirGradient monitors (or airgradient-proxy services).',
             author="John A Kline",
             author_email="john@johnkline.com",
             data_services='user.airgradient.AirGradient',
@@ -48,6 +48,12 @@ class AirGradientInstaller(ExtensionInstaller):
                 },
                 'AirGradient': {
                     'poll_secs'          : 15,
+                    # Deliberately empty: weectl merges installer config into an
+                    # existing [AirGradient] section on upgrade, so any entries
+                    # here would be injected into customized mappings (e.g., the
+                    # README's purple-coexistence setup, which must NOT map the
+                    # pm fields).  The service logs an error when the mapping is
+                    # empty; the README documents the suggested entries.
                     'LoopFields' : {
                     },
                     'Proxy1'   : {
