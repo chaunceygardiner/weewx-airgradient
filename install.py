@@ -32,7 +32,7 @@ def loader():
 class AirGradientInstaller(ExtensionInstaller):
     def __init__(self):
         super(AirGradientInstaller, self).__init__(
-            version="2.0",
+            version="2.0.1",
             name='airgradient',
             description='Record air quality readings from AirGradient monitors (or airgradient-proxy services).',
             author="John A Kline",
