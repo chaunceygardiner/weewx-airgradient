@@ -251,7 +251,7 @@ def parse_response(hostname: str, response: requests.Response) -> Optional[Readi
 
         sane, reason = is_sane(j)
         if not sane:
-            log.info('airgradient reading from %s not sane, %s: %s' % (hostname, reason, j))
+            log.warning('airgradient reading from %s not sane, %s: %s' % (hostname, reason, j))
             return None
 
         # if json contains 'measurementTime', the reading is from an airgradient-proxy.
