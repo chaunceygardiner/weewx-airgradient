@@ -1,6 +1,49 @@
 # GitHub Pages configuration for https://chaunceygardiner.github.io/weewx-airgradient/
-theme: jekyll-theme-primer
 title: weewx-airgradient
-description: "AirGradient air quality for WeeWX -- particulates, CO2, TVOC and NOx in every loop packet, AQI computed on demand, and archive gaps filled from a proxy's history"
+description: >-
+  AirGradient air quality for WeeWX -- particulates, CO2, TVOC and NOx in
+  every loop packet, AQI and its color computed on demand as XTypes, and the
+  archive periods WeeWX was down for filled in from an airgradient-proxy's
+  own archive history.
+url: "https://chaunceygardiner.github.io"
+baseurl: "/weewx-airgradient"
+
+# Pinned to the same version the other manuals render from, so they cannot
+# drift apart when upstream releases.
+remote_theme: just-the-docs/just-the-docs@v0.12.0
 plugins:
+  - jekyll-remote-theme
   - jekyll-sitemap
+  # Turns the .md links between pages into real URLs.  GitHub Pages enables
+  # this by default; naming it here keeps a local jekyll build identical.
+  - jekyll-relative-links
+
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "weewx-airgradient on GitHub":
+    - "https://github.com/chaunceygardiner/weewx-airgradient"
+aux_links_new_tab: true
+
+# External links shown at the bottom of the left sidebar nav, on every page.
+nav_external_links:
+  - title: weewx-airgradient on GitHub
+    url: https://github.com/chaunceygardiner/weewx-airgradient
+  - title: Download weewx-airgradient.zip
+    url: https://github.com/chaunceygardiner/weewx-airgradient/releases/latest/download/weewx-airgradient.zip
+
+callouts:
+  note:
+    title: Note
+    color: blue
+  important:
+    title: Important
+    color: red
+  tip:
+    title: Tip
+    color: green
+
+footer_content: >-
+  weewx-airgradient is Copyright &copy; 2025&ndash;2026 John A Kline and is
+  licensed under the GNU Public License v3.

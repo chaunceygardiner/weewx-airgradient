@@ -1,16 +1,13 @@
 ---
-title: Troubleshooting weewx-airgradient
+title: Troubleshooting
+layout: default
+nav_order: 6
 description: Log messages, the manual collector harness, and running the hermetic test suite.
 ---
 
 # Troubleshooting weewx-airgradient
 
-[Home](index.md) ·
-[Installation](installation.md) ·
-[Configuration](configuration.md) ·
-[Filling gaps after downtime](gaps.md) ·
-[Fields in reports](fields.md) ·
-[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
+[weewx-airgradient manual](https://chaunceygardiner.github.io/weewx-airgradient/) · [weewx-airgradient on GitHub](https://github.com/chaunceygardiner/weewx-airgradient) · [Report an issue](https://github.com/chaunceygardiner/weewx-airgradient/issues)
 
 ---
 

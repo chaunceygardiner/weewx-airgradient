@@ -1,5 +1,8 @@
 ---
-title: weewx-airgradient — AirGradient air quality for WeeWX
+title: Home
+layout: default
+nav_order: 1
+permalink: /
 description: A WeeWX extension that reads an AirGradient monitor (or airgradient-proxy), inserts particulates, CO2, TVOC and NOx into every loop packet, serves AQI on demand as XTypes, and fills archive gaps from a proxy's history.
 ---
 
@@ -9,14 +12,7 @@ description: A WeeWX extension that reads an AirGradient monitor (or airgradient
 every loop packet; AQI and its color computed on demand, never stored; and
 the archive periods WeeWX was down for filled in from a proxy's history.
 
-[Installation](installation.md) ·
-[Configuration](configuration.md) ·
-[Filling gaps after downtime](gaps.md) ·
-[Fields in reports](fields.md) ·
-[Troubleshooting](troubleshooting.md) ·
-[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
-
----
+[View on GitHub](https://github.com/chaunceygardiner/weewx-airgradient){: .btn .btn-primary }
 
 weewx-airgradient reads an [AirGradient](https://www.airgradient.com/) air
 quality monitor on the local network (or an
@@ -80,9 +76,3 @@ A small demo report is installed at `<HTML_ROOT>/airgradient`:
   [airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
   polling that monitor.  Gap filling requires one; everything else works
   without it.
-
-## Copyright
-
-Copyright (C) 2025-2026 by John A Kline (john@johnkline.com)
-
-Distributed under the terms of the GNU Public License (GPLv3).

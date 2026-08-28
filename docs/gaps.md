@@ -1,16 +1,13 @@
 ---
 title: Filling gaps after downtime
+layout: default
+nav_order: 4
 description: How weewx-airgradient fills the archive records WeeWX was not running for, using an airgradient-proxy's own archive history.
 ---
 
 # Filling gaps after downtime
 
-[Home](index.md) ·
-[Installation](installation.md) ·
-[Configuration](configuration.md) ·
-[Fields in reports](fields.md) ·
-[Troubleshooting](troubleshooting.md) ·
-[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
+[weewx-airgradient manual](https://chaunceygardiner.github.io/weewx-airgradient/) · [weewx-airgradient on GitHub](https://github.com/chaunceygardiner/weewx-airgradient) · [Report an issue](https://github.com/chaunceygardiner/weewx-airgradient/issues)
 
 ---
 

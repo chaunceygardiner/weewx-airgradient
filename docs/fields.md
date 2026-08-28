@@ -1,16 +1,13 @@
 ---
-title: weewx-airgradient fields in reports
+title: Fields in reports
+layout: default
+nav_order: 5
 description: Every AirGradient field you can map, using them in WeeWX reports — tags, aggregates, graphs — and how AQI is computed and (not) stored.
 ---
 
 # weewx-airgradient fields in reports
 
-[Home](index.md) ·
-[Installation](installation.md) ·
-[Configuration](configuration.md) ·
-[Filling gaps after downtime](gaps.md) ·
-[Troubleshooting](troubleshooting.md) ·
-[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
+[weewx-airgradient manual](https://chaunceygardiner.github.io/weewx-airgradient/) · [weewx-airgradient on GitHub](https://github.com/chaunceygardiner/weewx-airgradient) · [Report an issue](https://github.com/chaunceygardiner/weewx-airgradient/issues)
 
 ---
 
