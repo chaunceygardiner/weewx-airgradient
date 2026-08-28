@@ -8,6 +8,9 @@ into every WeeWX loop packet.
 
 Copyright (C) 2025-2026 by John A Kline (john@johnkline.com)
 
+[User manual](https://chaunceygardiner.github.io/weewx-airgradient/) ·
+[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
+
 **Requires:**
 * WeeWX 4 or 5
 * Python 3.9 or greater
@@ -15,6 +18,10 @@ Copyright (C) 2025-2026 by John A Kline (john@johnkline.com)
   schema (it contains the `pm1_0`, `pm2_5`, `pm10_0` and `co2` columns)
 * The `python-dateutil` and `requests` Python packages
 * An AirGradient monitor reachable on your local network
+* Recommended: an
+  [airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
+  polling that monitor.  Filling gaps after downtime requires one;
+  everything else works without it.
 
 Not sure about the schema?  wview_extended is the default for new WeeWX 4
 and 5 installs; only databases created under WeeWX 3 and carried forward
@@ -60,6 +67,16 @@ Readings are sanity checked: a reading is rejected if fields are
 non-numeric or if the reading is stale.  If multiple monitors/proxies are
 configured, they are tried in order until one produces a good reading.
 
+Gaps are filled in, too.  When WeeWX is not running — a restart, a reboot, a
+power cut — the station's logger keeps recording, and WeeWX archives those
+records when it comes back.  They contain no air quality data, because this
+extension was not there to supply any.  If an
+[airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
+is configured, the mapped fields are fetched from the proxy's own archive
+history and filled in, so an outage no longer leaves a hole in the columns
+and the graphs that draw them.  See
+[Filling gaps after downtime](#filling-gaps-after-downtime).
+
 ### AQI categories
 
 `pm2_5_aqi` conforms to the
@@ -99,10 +116,23 @@ A small demo report is installed at `<HTML_ROOT>/airgradient`:
 ### What's airgradient-proxy?
 
 [airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
-is an optional service that averages sensor readings over the archive
-period.  Its install is crude and has only been tested on Debian; use of
-airgradient-proxy is discouraged for all but the most Unix/Linux savvy.  If
-in doubt, skip it and query the AirGradient monitor directly.
+is a small service that polls the monitor for you and keeps its own archive
+of the readings.  Running one is recommended, for three reasons:
+
+* **It spares the monitor.**  Everything that queries an AirGradient
+  competes for the same small processor.  The proxy queries it at one
+  steady rate and answers everyone else.
+* **It serves an average, not a spot reading.**  Each record it archives is
+  an average of that whole archive period.
+* **It fills the gaps.**  Because the proxy keeps archive records of its
+  own, weewx-airgradient can go back and fill in the air quality data for
+  the periods WeeWX was down for.  Nothing else can: a monitor queried
+  directly keeps no history, so those records stay empty forever.
+
+Two proxies on different machines can poll the same monitor for redundancy,
+and weewx-airgradient will try each configured proxy in turn.  The install
+is a script (`sudo ./install`) and has been tested on Debian and Raspberry
+Pi OS; on other platforms it serves as a specification of the steps needed.
 
 # Installation
 
@@ -147,6 +177,17 @@ in doubt, skip it and query the AirGradient monitor directly.
    sudo /home/weewx/bin/wee_extension --install weewx-airgradient.zip
    ```
 
+1. Consider installing
+   [airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
+   (optional, recommended).
+
+   It polls the monitor on your behalf, serves period averages, and keeps an
+   archive history — which is the only thing that can fill in the periods
+   WeeWX was not running for.  Set its `archive-interval-secs` to WeeWX's
+   archive interval, then configure it here as `[[Proxy1]]`.  See
+   [What's airgradient-proxy?](#whats-airgradient-proxy) and
+   [Filling gaps after downtime](#filling-gaps-after-downtime).
+
 1. Edit the `[AirGradient]` section of weewx.conf (created by the install)
    to point at your monitor and fill in the `[[LoopFields]]` mapping (see
    Configuration below), then restart WeeWX.
@@ -184,7 +225,7 @@ in doubt, skip it and query the AirGradient monitor directly.
         enable = false
         hostname = proxy1
         port = 8080
-        timeout = 5
+        timeout = 1
 ```
 
 | Option      | Default                    | Meaning                                       |
@@ -194,7 +235,7 @@ in doubt, skip it and query the AirGradient monitor directly.
 | `enable`    | false                      | Whether this source is polled                 |
 | `hostname`  |                            | Hostname or IP address of the monitor/proxy   |
 | `port`      | 80 (sensor) / 8080 (proxy) | Port to connect on                            |
-| `timeout`   | 10                         | HTTP timeout (seconds)                        |
+| `timeout`   | 1 (proxy) / 10 (sensor)    | HTTP timeout (seconds).  A proxy answers from its own database on the local network, so a second is ample; a monitor's own processor is slow, and the installer writes 15 for one. |
 
 AirGradient monitors are specified with subsections `[[Sensor1]]`,
 `[[Sensor2]]`, etc.; airgradient-proxy services with `[[Proxy1]]`,
@@ -255,6 +296,11 @@ Any field the monitor reports can be mapped.  The full list:
 All fields are optional: AirGradient models differ in which fields they
 report, and missing fields are simply skipped.
 
+The four non-numeric fields — `serialno`, `ledMode`, `firmware` and `model`
+— can be mapped, but cannot be filled in for an archive period WeeWX missed:
+there is no average of them to write.  See
+[Filling gaps after downtime](#filling-gaps-after-downtime).
+
 ### Adding TVOC/NOx columns to the database (optional)
 
 `tvoc`, `tvocIndex`, `nox` and `noxIndex` are not in the wview_extended
@@ -271,6 +317,61 @@ weectl database add-column nox --type=REAL
 weectl database add-column noxIndex --type=REAL
 sudo systemctl start weewx
 ```
+
+# Filling gaps after downtime
+
+If at least one `[[ProxyN]]` source is enabled, weewx-airgradient also fills
+in air quality data for the archive periods WeeWX itself was not running for.
+When WeeWX starts, the station's logger hands over the records it kept while
+WeeWX was down; those records contain none of this extension's fields,
+because nothing was there to supply them.  For each such record, the proxies
+are asked — in configured order — for the archive records covering that
+period, and the average is written into the record before WeeWX stores it.
+Exactly the fields in `[[LoopFields]]` are filled, with exactly the values
+the live path would have written: `pm2_5` is the compensated reading if that
+is what the mapping asks for, and a temperature arrives in the record's own
+unit system.  A backfilled `pm2_5` also restores `pm2_5_aqi` and
+`pm2_5_aqi_color` for that period, since the AQI xtype computes them from
+what is stored.
+
+**Set airgradient-proxy's `archive-interval-secs` to match WeeWX's archive
+interval.**  WeeWX logs the interval it is using at startup (`Using archive
+interval of 300 seconds`), and weewx-airgradient logs the same number
+(`archive_interval: 300`).  With the two matched, each proxy record lines up
+exactly with one WeeWX period.  A proxy that archives more often is handled
+— its records for the period are averaged — but a proxy that archives
+*less* often than WeeWX has no record to offer for most periods, and those go
+unfilled.
+
+Periods WeeWX did see are never touched: whatever WeeWX averaged from the
+loop packets stands.  That includes a period it saw only part of — one loop
+packet's worth of data is what WeeWX would have stored for that period
+anyway.
+
+A proxy normally has the record for the period that has only just closed: its
+polls are aligned to the clock, so one lands on the archive boundary and the
+record is written a second or two later — before WeeWX archives that period
+at all.  When no proxy has it — a proxy running with a `poll-freq-offset`
+can still be a few seconds behind, and one that was down for the period has
+nothing — the proxy's two minute average stands in, and then only if the two
+minutes it covers reach into the period being filled.  Any period further
+back that no proxy can answer for is left alone: an empty column is the
+honest answer, and better than a value that describes some other stretch of
+time.
+
+With no proxy configured, none of this happens.  A monitor queried directly
+keeps no history, so there is nothing to ask for, and the columns for those
+periods stay empty.
+
+Two log messages come from this, one per archive record:
+
+```
+INFO user.airgradient: Backfilled pm1_0, pm2_5, pm10_0, co2 into archive record 2026-08-26 18:40:00 PDT (1787794800).
+INFO user.airgradient: No proxy data with which to fill pm1_0, pm2_5, pm10_0, co2 in archive record ...
+```
+
+The second is also how a proxy that is down announces itself, once per
+archive period, for as long as it stays down.
 
 # Using weewx-airgradient fields in reports
 
@@ -440,6 +541,19 @@ out of the mapping.
   `Fresh reading available again.` is logged on recovery.
 * `airgradient reading from <host> not sane, ...`: the reason and the
   offending reading are included in the message.
+* `Backfilled ... into archive record <time>`: an archive period WeeWX was
+  not running for has had its air quality data filled in from a proxy's
+  archive history.  Expect one line per record after an outage.
+* `No proxy data with which to fill ... in archive record <time>`: no
+  configured proxy could answer for that period, so those columns were left
+  empty.  Logged once per archive record, which is also how a proxy that is
+  down makes itself heard for as long as it stays down.
+* **The columns are empty for a stretch of time.**  WeeWX was not running
+  then, and the periods were filled only if a proxy could answer for them —
+  see [Filling gaps after downtime](#filling-gaps-after-downtime).  With no
+  `[[ProxyN]]` configured nothing is filled, and the log says nothing about
+  it.  With one configured, look for `Backfilled ...` or `No proxy data with
+  which to fill ...` at the time WeeWX restarted.
 * To watch what the collector sees, run the module directly against a
   monitor:
 

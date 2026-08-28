@@ -6,7 +6,10 @@ the fetch stack down is exercised with mocks, and the xtype SQL paths run
 against an in-memory SQLite database."""
 
 import datetime
+import importlib
+import importlib.util
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -603,6 +606,10 @@ class TestNewLoopPacket(unittest.TestCase):
         ag.cfg = make_cfg(reading=reading, loop_fields=loop_fields,
                           enable_aqi=enable_aqi)
         ag.stale_logged = False
+        ag.archive_interval = 300
+        ag.reading_times = []
+        ag.reading_retention_secs = 600
+        ag.proxy_retry_after = {}
         return ag
 
     @staticmethod
@@ -712,6 +719,7 @@ class TestAirGradientInit(unittest.TestCase):
 
     def test_startup_with_sources(self):
         engine = mock.Mock()
+        engine.console.archive_interval = 300
         config = {
             'AirGradient': {
                 'poll_secs': 50,
@@ -746,8 +754,11 @@ class TestAirGradientInit(unittest.TestCase):
             self.assertTrue(kwargs['daemon'])
             self.assertEqual(kwargs['name'], 'AirGradient')
             thread_cls.return_value.start.assert_called_once()
-            # Bound to NEW_LOOP_PACKET.
-            engine.bind.assert_called_once_with(weewx.NEW_LOOP_PACKET, ag.new_loop_packet)
+            # Bound to NEW_LOOP_PACKET, and -- because a proxy is enabled --
+            # to NEW_ARCHIVE_RECORD for the archive backfill.
+            self.assertEqual(engine.bind.call_args_list, [
+                mock.call(weewx.NEW_LOOP_PACKET, ag.new_loop_packet),
+                mock.call(weewx.NEW_ARCHIVE_RECORD, ag.new_archive_record)])
         finally:
             # Unregister anything this test added to the global xtypes list
             # and the global accumulator config.
@@ -756,6 +767,7 @@ class TestAirGradientInit(unittest.TestCase):
 
     def test_startup_with_aqi_disabled(self):
         engine = mock.Mock()
+        engine.console.archive_interval = 300
         config = {
             'AirGradient': {
                 'enable_aqi': 'false',
@@ -776,6 +788,7 @@ class TestAirGradientInit(unittest.TestCase):
 
     def test_startup_without_sources_is_inoperable(self):
         engine = mock.Mock()
+        engine.console.archive_interval = 300
         config = {'AirGradient': {'Sensor1': {'enable': False, 'hostname': 's'}}}
         n_xtypes = len(weewx.xtypes.xtypes)
         with mock.patch('user.airgradient.get_reading') as gr, \
@@ -1055,6 +1068,852 @@ class TestGetAggregate(unittest.TestCase):
         # Average of the archive rows within the span, (9.0 + 35.4) / 2 = 22.2;
         # the daily summaries (which would give 10.0) must not be consulted.
         self.assertEqual(vt.value, AQI.compute_pm2_5_aqi(22.2))
+
+class TestLoopValues(unittest.TestCase):
+    """The one place a Reading becomes weewx fields.  Both the loop path and
+    the archive backfill go through it, which is what makes a backfilled
+    record carry the same quantity the loop path stores."""
+
+    def test_fields_mapped_and_named(self):
+        values = user.airgradient.loop_values(make_reading(), weewx.US, dict(LOOP_FIELDS))
+        self.assertEqual(values['pm1_0'], 0.67)
+        self.assertEqual(values['pm2_5'], 1.03)   # pm02Compensated
+        self.assertEqual(values['co2'], 514.0)
+        self.assertEqual(values['nox'], 18138.67)
+
+    def test_temperature_converted_to_us(self):
+        values = user.airgradient.loop_values(
+            make_reading(), weewx.US, {'atmp': 'purple_temperature'})
+        self.assertAlmostEqual(values['purple_temperature'], 71.438, places=3)
+
+    def test_temperature_unconverted_in_metric(self):
+        values = user.airgradient.loop_values(
+            make_reading(), weewx.METRIC, {'atmp': 'purple_temperature'})
+        self.assertEqual(values['purple_temperature'], 21.91)
+
+    def test_none_field_absent(self):
+        values = user.airgradient.loop_values(
+            make_reading(rco2=None), weewx.US, dict(LOOP_FIELDS))
+        self.assertNotIn('co2', values)
+
+    def test_unknown_airgradient_field_absent(self):
+        values = user.airgradient.loop_values(
+            make_reading(), weewx.US, {'no_such_field': 'whatever'})
+        self.assertEqual(values, {})
+
+class TestReadingTimeTally(unittest.TestCase):
+    """When the extension had a fresh reading to insert -- the only evidence
+    that tells a period the accumulator has samples for from one it does not.
+
+    Recorded per PACKET, not per field: which fields a reading carries is a
+    property of the monitor (an Open Air reports no CO2, an SGP41-less unit
+    no NOx), and a field the monitor never reports is not a gap a proxy
+    polling that same monitor could fill."""
+
+    @staticmethod
+    def make_airgradient(loop_fields=None, retention_secs=600):
+        ag = AirGradient.__new__(AirGradient)
+        ag.cfg = make_cfg(reading=None, loop_fields=loop_fields)
+        ag.stale_logged = False
+        ag.archive_interval = 300
+        ag.reading_times = []
+        ag.reading_retention_secs = retention_secs
+        ag.proxy_retry_after = {}
+        return ag
+
+    def test_packet_time_is_tallied(self):
+        ag = self.make_airgradient()
+        ag.record_reading_time({'dateTime': 1000.0})
+        self.assertEqual(ag.reading_times, [1000.0])
+
+    def test_window_is_exclusive_at_the_start_and_inclusive_at_the_end(self):
+        ag = self.make_airgradient()
+        ag.record_reading_time({'dateTime': 1000.0})
+        self.assertTrue(ag.saw_reading_in(700.0, 1000.0))   # inclusive end
+        self.assertFalse(ag.saw_reading_in(1000.0, 1300.0)) # exclusive start
+        self.assertFalse(ag.saw_reading_in(1001.0, 1300.0))
+
+    def test_period_with_no_reading_was_not_seen(self):
+        ag = self.make_airgradient()
+        ag.record_reading_time({'dateTime': 1000.0})
+        self.assertFalse(ag.saw_reading_in(1300.0, 1600.0))
+
+    def test_old_entries_are_pruned(self):
+        ag = self.make_airgradient(retention_secs=600)
+        for ts in [1000.0, 1300.0, 1600.0, 1900.0]:
+            ag.record_reading_time({'dateTime': ts})
+        # Retention is two archive intervals back from the newest packet.
+        self.assertEqual(ag.reading_times, [1300.0, 1600.0, 1900.0])
+
+    def test_packet_without_datetime_uses_now(self):
+        ag = self.make_airgradient()
+        before = time.time()
+        ag.record_reading_time({})
+        self.assertGreaterEqual(ag.reading_times[0], before)
+
+    def test_packet_with_a_null_datetime_uses_now(self):
+        # to_float(None) is None, and the cutoff arithmetic would then raise
+        # inside new_loop_packet -- which has no handler, so it would escape
+        # into dispatchEvent and stop weewxd.
+        ag = self.make_airgradient()
+        before = time.time()
+        ag.record_reading_time({'dateTime': None})
+        self.assertGreaterEqual(ag.reading_times[0], before)
+
+    def test_a_fresh_reading_counts_even_when_it_carries_none_of_the_mapped_fields(self):
+        # The monitor reporting nothing this install maps is not the same as
+        # this extension being absent, and a proxy polling that same monitor
+        # has nothing to offer either.
+        ag = self.make_airgradient(loop_fields={'rco2': 'co2'})
+        ag.cfg.reading = make_reading(rco2=None)
+        event = types.SimpleNamespace(packet={'usUnits': weewx.US, 'dateTime': 1000.0})
+        ag.new_loop_packet(event)
+        self.assertNotIn('co2', event.packet)
+        self.assertTrue(ag.saw_reading_in(700.0, 1000.0))
+
+    def test_a_stale_reading_is_not_tallied(self):
+        # Nothing was inserted, so the accumulator got nothing -- this is a
+        # period a proxy genuinely may be able to answer for.
+        ag = self.make_airgradient()
+        ag.cfg.reading = make_reading(age_secs=10000.0)
+        event = types.SimpleNamespace(packet={'usUnits': weewx.US, 'dateTime': 1000.0})
+        ag.new_loop_packet(event)
+        self.assertEqual(ag.reading_times, [])
+
+class TestFetchProxyArchiveRecords(unittest.TestCase):
+    """Asking an airgradient-proxy for the records covering one period."""
+
+    def test_url_uses_comma_separated_args(self):
+        # The proxy splits its args on ',', not '&' -- this is not a normal
+        # query string.  since_ts is exclusive and max_ts inclusive, which is
+        # exactly a WeeWX archive period.
+        source = make_source('Proxy1', is_proxy=True, hostname='proxy1')
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([])) as get:
+            user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(
+            get.call_args.kwargs['url'],
+            'http://proxy1:8080/fetch-archive-records?since_ts=1000,max_ts=1300')
+        self.assertEqual(get.call_args.kwargs['timeout'], 1)
+
+    def test_records_parsed(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([proxy_pkt(), proxy_pkt()])):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(len(readings), 2)
+        self.assertEqual(readings[0].pm02Compensated, 1.03)
+
+    def test_empty_period_is_an_empty_list_not_none(self):
+        # An empty answer means the proxy has no record for the period -- a
+        # different thing from a proxy that could not be reached.
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([])):
+            self.assertEqual(
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300), [])
+
+    def test_insane_record_skipped(self):
+        source = make_source('Proxy1', is_proxy=True)
+        bad = proxy_pkt()
+        bad['atmp'] = 'hot'
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([bad, proxy_pkt()])):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(len(readings), 1)
+
+    def test_answer_that_is_not_a_list_returns_none(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse({'not': 'a list'})):
+            self.assertIsNone(
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300))
+
+    def test_entry_that_is_not_a_record_costs_only_that_entry(self):
+        # Skipped like any other unusable record.  Returning None would tell
+        # the caller the proxy is DOWN -- an archive interval of cooldown and
+        # no two minute fallback -- for what is a parse problem.
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(['nonsense', proxy_pkt()])):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(len(readings), 1)
+
+    def test_a_list_of_nothing_usable_is_empty_not_unreachable(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(['nonsense', None])):
+            self.assertEqual(
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300), [])
+
+    def test_record_without_serialno_costs_only_that_record(self):
+        # reading_from_json raises on it (is_sane treats serialno as optional
+        # and the proxy omits the field when it is NULL, so a proxy can emit
+        # such a record persistently).  Caught per entry: the rest of the
+        # period survives, and the caller is never told the proxy is down.
+        source = make_source('Proxy1', is_proxy=True)
+        pkt = proxy_pkt()
+        del pkt['serialno']
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([pkt, proxy_pkt()])):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(len(readings), 1)
+
+    def test_a_batch_of_only_bad_records_is_empty_not_unreachable(self):
+        # An empty list means "no data for the period" and lets the two
+        # minute fallback run; None would mean "unreachable" and would put
+        # the proxy on an archive-interval cooldown.
+        source = make_source('Proxy1', is_proxy=True)
+        pkt = proxy_pkt()
+        del pkt['serialno']
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([pkt])):
+            self.assertEqual(
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300), [])
+
+    def test_terminate_in_a_record_passes_through(self):
+        # The per-entry handler is on the main thread too.
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([proxy_pkt()])), \
+             mock.patch('user.airgradient.reading_from_json', side_effect=Terminate()):
+            with self.assertRaises(Terminate):
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+
+    def test_unreachable_proxy_returns_none(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        side_effect=Exception('connection refused')):
+            self.assertIsNone(
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300))
+
+    def test_terminate_passes_through(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get', side_effect=Terminate()):
+            with self.assertRaises(Terminate):
+                user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+
+class TestFetchProxyTwoMinuteReading(unittest.TestCase):
+    """The stand-in for a just-closed period no proxy has archived yet.  It is
+    a SEPARATE endpoint from the /measures/current this extension polls:
+    against a proxy that one answers with the single latest reading, and only
+    /fetch-two-minute-record is an average."""
+
+    def test_url_and_parse(self):
+        source = make_source('Proxy1', is_proxy=True, hostname='proxy1')
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(proxy_pkt())) as get:
+            reading = user.airgradient.fetch_proxy_two_minute_reading(source)
+        self.assertEqual(get.call_args.kwargs['url'],
+                         'http://proxy1:8080/fetch-two-minute-record')
+        self.assertEqual(reading.pm02Compensated, 1.03)
+
+    def test_empty_object_returns_none(self):
+        # The proxy answers {} when it holds no two minute record.  It passes
+        # is_sane (every field is optional) but has no serialno to parse.
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse({})):
+            self.assertIsNone(user.airgradient.fetch_proxy_two_minute_reading(source))
+
+    def test_answer_that_is_not_an_object_returns_none(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([proxy_pkt()])):
+            self.assertIsNone(user.airgradient.fetch_proxy_two_minute_reading(source))
+
+    def test_unreachable_proxy_returns_none(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        side_effect=Exception('connection refused')):
+            self.assertIsNone(user.airgradient.fetch_proxy_two_minute_reading(source))
+
+    def test_unparseable_record_is_reported_as_a_parse_problem(self):
+        # Not as a failure to reach the proxy: the proxy answered, and the
+        # record it answered with is what could not be used.
+        source = make_source('Proxy1', is_proxy=True)
+        pkt = proxy_pkt()
+        del pkt['serialno']
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(pkt)), \
+             self.assertLogs('user.airgradient', level='WARNING') as logged:
+            self.assertIsNone(user.airgradient.fetch_proxy_two_minute_reading(source))
+        self.assertIn('could not be parsed', ''.join(logged.output))
+
+    def test_terminate_passes_through(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get', side_effect=Terminate()):
+            with self.assertRaises(Terminate):
+                user.airgradient.fetch_proxy_two_minute_reading(source)
+
+    def test_terminate_while_parsing_passes_through(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(proxy_pkt())), \
+             mock.patch('user.airgradient.reading_from_json', side_effect=Terminate()):
+            with self.assertRaises(Terminate):
+                user.airgradient.fetch_proxy_two_minute_reading(source)
+
+class TestAverageReadings(unittest.TestCase):
+    """Averaging the proxy records that cover one WeeWX archive period.  With
+    both intervals at 300s there is exactly one; a proxy archiving more often
+    than WeeWX does yields several."""
+
+    def test_values_are_averaged(self):
+        readings = [make_reading(rco2=400.0, pm02Compensated=2.0),
+                    make_reading(rco2=600.0, pm02Compensated=4.0)]
+        values = user.airgradient.average_readings(readings, weewx.US, dict(LOOP_FIELDS))
+        self.assertEqual(values['co2'], 500.0)
+        self.assertEqual(values['pm2_5'], 3.0)
+
+    def test_single_reading_is_itself(self):
+        values = user.airgradient.average_readings(
+            [make_reading()], weewx.US, dict(LOOP_FIELDS))
+        self.assertEqual(values['pm2_5'], 1.03)
+
+    def test_field_missing_from_some_readings(self):
+        # Averaged over the readings that carry it, not over all of them.
+        readings = [make_reading(rco2=400.0), make_reading(rco2=None)]
+        values = user.airgradient.average_readings(readings, weewx.US, dict(LOOP_FIELDS))
+        self.assertEqual(values['co2'], 400.0)
+
+    def test_non_numeric_fields_are_skipped(self):
+        # [LoopFields] can map ledMode, firmware, model or serialno, and there
+        # is no average of those.
+        loop_fields = {'ledMode': 'led_mode', 'firmware': 'fw', 'rco2': 'co2'}
+        values = user.airgradient.average_readings(
+            [make_reading(), make_reading()], weewx.US, loop_fields)
+        self.assertEqual(values, {'co2': 514.0})
+
+    def test_temperature_converted_before_averaging(self):
+        readings = [make_reading(atmp=0.0), make_reading(atmp=100.0)]
+        values = user.airgradient.average_readings(
+            readings, weewx.US, {'atmp': 'purple_temperature'})
+        self.assertEqual(values['purple_temperature'], 122.0)  # (32 + 212) / 2
+
+    def test_no_readings_yields_nothing(self):
+        self.assertEqual(
+            user.airgradient.average_readings([], weewx.US, dict(LOOP_FIELDS)), {})
+
+class TestArchiveInterval(unittest.TestCase):
+    """The interval WeeWX actually archives on -- the console's under hardware
+    record generation, weewx.conf's under software.  It sets the tally
+    retention, the proxy cooldown, and the window for a record that arrives
+    without an interval of its own."""
+
+    @staticmethod
+    def build(engine, config):
+        with mock.patch('user.airgradient.get_reading', return_value=make_reading()), \
+             mock.patch('user.airgradient.threading.Thread'):
+            return AirGradient(engine, config)
+
+    @staticmethod
+    def base_config(**std_archive):
+        return {
+            'StdArchive': std_archive,
+            'AirGradient': {
+                'LoopFields': dict(LOOP_FIELDS),
+                'Sensor1': {'enable': True, 'hostname': 'sensor1'},
+            },
+        }
+
+    def setUp(self):
+        self.n_xtypes = len(weewx.xtypes.xtypes)
+        self.orig_accum_maps = list(weewx.accum.accum_dict.maps)
+
+    def tearDown(self):
+        del weewx.xtypes.xtypes[0:len(weewx.xtypes.xtypes) - self.n_xtypes]
+        weewx.accum.accum_dict.maps[:] = self.orig_accum_maps
+
+    def test_hardware_generation_prefers_the_console(self):
+        engine = mock.Mock()
+        engine.console.archive_interval = 600
+        ag = self.build(engine, self.base_config(archive_interval=300))
+        self.assertEqual(ag.archive_interval, 600)
+        self.assertEqual(ag.reading_retention_secs, 1200)
+
+    def test_software_generation_ignores_the_console(self):
+        engine = mock.Mock()
+        engine.console.archive_interval = 1800
+        ag = self.build(engine, self.base_config(
+            record_generation='software', archive_interval=300))
+        self.assertEqual(ag.archive_interval, 300)
+
+    def test_console_of_none_falls_back_to_config(self):
+        # A driver that answers None would otherwise stop weewx from starting.
+        engine = mock.Mock()
+        engine.console.archive_interval = None
+        ag = self.build(engine, self.base_config(archive_interval=600))
+        self.assertEqual(ag.archive_interval, 600)
+
+    def test_driver_that_cannot_report_falls_back_to_config(self):
+        engine = mock.Mock()
+        type(engine.console).archive_interval = mock.PropertyMock(
+            side_effect=NotImplementedError)
+        try:
+            ag = self.build(engine, self.base_config(archive_interval=600))
+            self.assertEqual(ag.archive_interval, 600)
+        finally:
+            del type(engine.console).archive_interval
+
+    def test_default_is_five_minutes(self):
+        engine = mock.Mock()
+        engine.console.archive_interval = None
+        ag = self.build(engine, self.base_config())
+        self.assertEqual(ag.archive_interval, 300)
+
+class TestNewArchiveRecord(unittest.TestCase):
+    """Filling in the periods WeeWX was not running for.
+
+    The record itself cannot say whether the accumulator has anything for the
+    period: under hardware record generation the graft happens AFTER this
+    service's handler, so every hardware record is empty at this point.  What
+    this extension injected is the discriminator."""
+
+    @staticmethod
+    def make_airgradient(sources=None, loop_fields=None, archive_interval=300):
+        ag = AirGradient.__new__(AirGradient)
+        ag.cfg = make_cfg(
+            sources=sources if sources is not None
+                    else [make_source('Proxy1', is_proxy=True, hostname='proxy1')],
+            reading=None, loop_fields=loop_fields)
+        ag.stale_logged = False
+        ag.archive_interval = archive_interval
+        ag.reading_times = []
+        ag.reading_retention_secs = 2 * archive_interval
+        ag.proxy_retry_after = {}
+        return ag
+
+    @staticmethod
+    def make_event(ts, interval=5, unit_system=weewx.US, **fields):
+        record = {'dateTime': ts, 'usUnits': unit_system, 'interval': interval}
+        record.update(fields)
+        return types.SimpleNamespace(record=record)
+
+    def test_empty_period_is_filled_from_the_proxy(self):
+        ag = self.make_airgradient()
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[make_reading()]) as fetch:
+            ag.new_archive_record(event)
+        # The window is the record's own interval: (dateTime - 5*60, dateTime].
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args[0][1:], (1000, 1300))
+        self.assertEqual(event.record['pm2_5'], 1.03)
+        self.assertEqual(event.record['co2'], 514.0)
+
+    def test_period_we_had_readings_for_is_left_alone(self):
+        # Whatever the accumulator made of them stands, and the proxy is not
+        # asked at all.
+        ag = self.make_airgradient()
+        ag.record_reading_time({'dateTime': 1100.0})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records') as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_not_called()
+        self.assertNotIn('pm2_5', event.record)
+        self.assertNotIn('co2', event.record)
+
+    def test_a_field_the_monitor_never_reports_is_not_a_gap(self):
+        # Regression: tallying per field left a mapped field the monitor does
+        # not report (no CO2 on an outdoor Open Air, no NOx without an SGP41)
+        # looking like a gap on EVERY archive record -- a blocking proxy fetch
+        # and a log line every archive period, forever, on a healthy install,
+        # for a field a proxy polling that same monitor cannot supply either.
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5',
+                                                'rco2': 'co2'})
+        ag.cfg.reading = make_reading(rco2=None)
+        packet = {'usUnits': weewx.US, 'dateTime': 1100.0}
+        ag.new_loop_packet(types.SimpleNamespace(packet=packet))
+        self.assertNotIn('co2', packet)  # the monitor reported no CO2
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records') as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_not_called()
+        self.assertNotIn('co2', event.record)
+
+    def test_nothing_mapped_means_no_fetch_at_all(self):
+        ag = self.make_airgradient(loop_fields={})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records') as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_not_called()
+
+    def test_present_but_none_is_filled(self):
+        # Under software record generation the accumulator has already had its
+        # say, and it writes None for a type it holds with no usable values.
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300, pm2_5=None)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[make_reading()]):
+            ag.new_archive_record(event)
+        self.assertEqual(event.record['pm2_5'], 1.03)
+
+    def test_a_value_already_in_the_record_is_never_overwritten(self):
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300, pm2_5=7.5)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records') as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_not_called()
+        self.assertEqual(event.record['pm2_5'], 7.5)
+
+    def test_fractional_interval_is_not_truncated(self):
+        # Under software record generation WeeWX sets interval to
+        # archive_interval / 60, so a 90 second archive interval arrives as
+        # 1.5.  to_int would make that a 60 second window, putting start_ts
+        # 30 seconds inside the period.
+        ag = self.make_airgradient(archive_interval=90,
+                                   loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300, interval=1.5)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]) as fetch:
+            ag.new_archive_record(event)
+        self.assertEqual(fetch.call_args[0][1:], (1210, 1300))
+
+    def test_a_reading_in_the_fractional_tail_of_the_period_counts_as_seen(self):
+        # The 30 seconds truncation used to drop off the front of the window.
+        ag = self.make_airgradient(archive_interval=90,
+                                   loop_fields={'pm02Compensated': 'pm2_5'})
+        ag.record_reading_time({'dateTime': 1220.0})
+        event = self.make_event(1300, interval=1.5)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records') as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_not_called()
+
+    def test_interval_of_none_does_not_escape(self):
+        # This runs outside the try, on a main-thread path: a TypeError here
+        # would go up through dispatchEvent and stop weewxd.
+        ag = self.make_airgradient(archive_interval=300,
+                                   loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300, interval=None)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]) as fetch:
+            ag.new_archive_record(event)
+        self.assertEqual(fetch.call_args[0][1:], (1000, 1300))
+
+    def test_record_without_an_interval_uses_the_archive_interval(self):
+        ag = self.make_airgradient(archive_interval=600)
+        event = self.make_event(1800, interval=0)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]) as fetch:
+            ag.new_archive_record(event)
+        self.assertEqual(fetch.call_args[0][1:], (1200, 1800))
+
+    def test_temperature_is_filled_in_the_records_unit_system(self):
+        ag = self.make_airgradient(loop_fields={'atmp': 'purple_temperature'})
+        event = self.make_event(1300, unit_system=weewx.METRIC)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[make_reading()]):
+            ag.new_archive_record(event)
+        self.assertEqual(event.record['purple_temperature'], 21.91)
+
+    def test_period_no_proxy_can_answer_for_is_left_empty(self):
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading') as two_min:
+            ag.new_archive_record(event)
+        # Long past: the two minute average says nothing about it, so it is
+        # not even asked for.
+        two_min.assert_not_called()
+        self.assertNotIn('pm2_5', event.record)
+
+    def test_proxies_are_tried_in_order_and_the_first_answer_wins(self):
+        sources = [make_source('Proxy1', is_proxy=True, hostname='proxy1'),
+                   make_source('Proxy2', is_proxy=True, hostname='proxy2')]
+        ag = self.make_airgradient(sources=sources,
+                                   loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        side_effect=[[], [make_reading(pm02Compensated=9.0)]]) as fetch:
+            ag.new_archive_record(event)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(event.record['pm2_5'], 9.0)
+
+    def test_disabled_and_sensor_sources_are_not_asked(self):
+        sources = [make_source('Sensor1', is_proxy=False, hostname='sensor1'),
+                   make_source('Proxy1', is_proxy=True, hostname='proxy1', enable=False),
+                   make_source('Proxy2', is_proxy=True, hostname='proxy2')]
+        ag = self.make_airgradient(sources=sources,
+                                   loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[make_reading()]) as fetch:
+            ag.new_archive_record(event)
+        fetch.assert_called_once()
+        self.assertEqual(fetch.call_args[0][0].hostname, 'proxy2')
+
+    def test_unreachable_proxy_is_not_asked_again_for_an_archive_interval(self):
+        # A catchup burst delivers records back to back; without the cooldown
+        # a dead proxy would cost its whole timeout for every one of them.
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=None) as fetch:
+            ag.new_archive_record(self.make_event(1300))
+            ag.new_archive_record(self.make_event(1600))
+            ag.new_archive_record(self.make_event(1900))
+        fetch.assert_called_once()
+
+    def test_unreachable_proxy_is_asked_again_after_the_cooldown(self):
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=None) as fetch:
+            ag.new_archive_record(self.make_event(1300))
+            # Pretend the cooldown has expired.
+            ag.proxy_retry_after = {k: 0.0 for k in ag.proxy_retry_after}
+            ag.new_archive_record(self.make_event(1600))
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_backfill_failure_is_logged_and_does_not_escape(self):
+        # Main thread: an exception escaping here goes up through
+        # dispatchEvent and stops weewxd.
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        event = self.make_event(1300)
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        side_effect=Exception('boom')):
+            ag.new_archive_record(event)
+        self.assertNotIn('pm2_5', event.record)
+
+    def test_terminate_passes_through(self):
+        ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        side_effect=Terminate()):
+            with self.assertRaises(Terminate):
+                ag.new_archive_record(self.make_event(1300))
+
+class TestTwoMinuteStandIn(unittest.TestCase):
+    """When no proxy has archived the period that just closed -- a proxy with
+    a poll-freq-offset, or one that was down -- its two minute average can
+    stand in, but only for a period that average actually covers."""
+
+    @staticmethod
+    def make_airgradient():
+        ag = AirGradient.__new__(AirGradient)
+        ag.cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True, hostname='proxy1')],
+                          reading=None, loop_fields={'pm02Compensated': 'pm2_5'})
+        ag.stale_logged = False
+        ag.archive_interval = 300
+        ag.reading_times = []
+        ag.reading_retention_secs = 600
+        ag.proxy_retry_after = {}
+        return ag
+
+    @staticmethod
+    def two_minute_reading(ts):
+        return make_reading(
+            measurementTime=datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc),
+            pm02Compensated=9.0)
+
+    def test_stands_in_for_the_period_that_just_closed(self):
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 20
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading',
+                        return_value=self.two_minute_reading(end_ts + 10)):
+            ag.new_archive_record(event)
+        self.assertEqual(event.record['pm2_5'], 9.0)
+
+    def test_stale_reading_whose_span_misses_the_period_is_refused(self):
+        # The reading is stamped at the end of the span it covers, so it
+        # describes (ts - 120, ts].  The enclosing recency guard settles the
+        # far edge, so the only way that span can miss the period is by
+        # ending before the period even began -- which is what a proxy that
+        # stopped polling leaves behind.
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 20
+        start_ts = end_ts - 300
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading',
+                        return_value=self.two_minute_reading(start_ts - 10)):
+            ag.new_archive_record(event)
+        self.assertNotIn('pm2_5', event.record)
+
+    def test_reading_stamped_inside_the_period_is_taken(self):
+        # The boundary the test above sits just outside of.
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 20
+        start_ts = end_ts - 300
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading',
+                        return_value=self.two_minute_reading(start_ts + 10)):
+            ag.new_archive_record(event)
+        self.assertEqual(event.record['pm2_5'], 9.0)
+
+    def test_older_period_never_asks_for_it(self):
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 3600
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading') as two_min:
+            ag.new_archive_record(event)
+        two_min.assert_not_called()
+        self.assertNotIn('pm2_5', event.record)
+
+    def test_unreachable_proxy_is_not_asked_for_a_two_minute_reading(self):
+        # It was just put on cooldown for failing the archive fetch.
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 20
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=None), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading') as two_min:
+            ag.new_archive_record(event)
+        two_min.assert_not_called()
+
+    def test_proxy_holding_no_two_minute_record_fills_nothing(self):
+        ag = self.make_airgradient()
+        end_ts = int(time.time()) - 20
+        event = types.SimpleNamespace(
+            record={'dateTime': end_ts, 'usUnits': weewx.US, 'interval': 5})
+        with mock.patch('user.airgradient.fetch_proxy_archive_records',
+                        return_value=[]), \
+             mock.patch('user.airgradient.fetch_proxy_two_minute_reading',
+                        return_value=None):
+            ag.new_archive_record(event)
+        self.assertNotIn('pm2_5', event.record)
+
+class TestArchiveHandlerBinding(unittest.TestCase):
+    """A direct-sensor install has no history to ask for, so it must see no
+    trace of the backfill: no binding, no fetches, no log messages."""
+
+    def setUp(self):
+        self.n_xtypes = len(weewx.xtypes.xtypes)
+        self.orig_accum_maps = list(weewx.accum.accum_dict.maps)
+
+    def tearDown(self):
+        del weewx.xtypes.xtypes[0:len(weewx.xtypes.xtypes) - self.n_xtypes]
+        weewx.accum.accum_dict.maps[:] = self.orig_accum_maps
+
+    def build(self, sources):
+        engine = mock.Mock()
+        engine.console.archive_interval = 300
+        config = {'AirGradient': dict({'LoopFields': dict(LOOP_FIELDS)}, **sources)}
+        with mock.patch('user.airgradient.get_reading', return_value=make_reading()), \
+             mock.patch('user.airgradient.threading.Thread'):
+            ag = AirGradient(engine, config)
+        return engine, ag
+
+    def test_sensor_only_install_does_not_bind(self):
+        engine, ag = self.build({'Sensor1': {'enable': True, 'hostname': 'sensor1'}})
+        self.assertEqual(engine.bind.call_args_list,
+                         [mock.call(weewx.NEW_LOOP_PACKET, ag.new_loop_packet)])
+
+    def test_disabled_proxy_does_not_bind(self):
+        engine, ag = self.build({
+            'Proxy1': {'enable': False, 'hostname': 'proxy1'},
+            'Sensor1': {'enable': True, 'hostname': 'sensor1'}})
+        self.assertEqual(engine.bind.call_args_list,
+                         [mock.call(weewx.NEW_LOOP_PACKET, ag.new_loop_packet)])
+
+    def test_enabled_proxy_binds(self):
+        engine, ag = self.build({'Proxy1': {'enable': True, 'hostname': 'proxy1'}})
+        self.assertIn(mock.call(weewx.NEW_ARCHIVE_RECORD, ag.new_archive_record),
+                      engine.bind.call_args_list)
+
+class TestInstallerConfig(unittest.TestCase):
+    """install.py's [StdReport] and [AirGradient] defaults.  These are only
+    ever read on a fresh `weectl extension install`, so a wrong value ships
+    silently: weecfg merges the stanza with conditional_merge, which fills in
+    absent keys only and never rewrites an existing weewx.conf."""
+
+    REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    @classmethod
+    def installer_config(cls):
+        """install.py's config stanza, whichever form it is written in.
+        Loading it needs weecfg.extension imported first: that module aliases
+        itself as 'setup' in sys.modules for installers written against the
+        pre-5.0 name, which is what install.py's own import resolves
+        through."""
+        importlib.import_module('weecfg.extension')  # registers the alias
+        spec = importlib.util.spec_from_file_location(
+            'airgradient_install', os.path.join(cls.REPO_DIR, 'install.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.AirGradientInstaller()['config']
+
+    def test_html_root_is_a_bare_subdirectory(self):
+        """HTML_ROOT must NOT carry a public_html prefix.  weecfg prepends the
+        installation's own StdReport HTML_ROOT at install time
+        (ExtensionEngine.install_config -> prepend_path), so 'airgradient'
+        becomes public_html/airgradient -- or whatever that installation uses.
+        Writing 'public_html/airgradient' here would land the report in
+        public_html/public_html/airgradient."""
+        report = self.installer_config()['StdReport']['AirGradientReport']
+        self.assertEqual(report['HTML_ROOT'], 'airgradient')
+        self.assertEqual(report['skin'], 'airgradient')
+
+    def test_demo_report_is_enabled_by_default(self):
+        # The demo page is meant to render without the user turning it on.
+        report = self.installer_config()['StdReport']['AirGradientReport']
+        self.assertTrue(weeutil.weeutil.to_bool(report['enable']))
+
+    def test_loop_fields_ships_empty(self):
+        """DELIBERATELY empty.  weectl merges this stanza into an existing
+        [AirGradient] section on upgrade, so a prefilled mapping would be
+        injected into a customized one -- which is exactly what happened on
+        07/18/2026, when the pm mappings landed in a weewx-purple
+        coexistence config and this extension began overwriting purple's
+        loop values."""
+        airgradient = self.installer_config()['AirGradient']
+        self.assertIn('LoopFields', airgradient)
+        self.assertEqual(dict(airgradient['LoopFields']), {})
+
+    def test_source_defaults(self):
+        """One sensor enabled, every proxy and the second sensor off.  Values
+        are compared through to_bool/to_int because a ConfigObj stanza yields
+        strings where a plain dict yields bools and ints -- the installed
+        weewx.conf is text either way, and airgradient.py coerces on read."""
+        airgradient = self.installer_config()['AirGradient']
+        self.assertEqual(weeutil.weeutil.to_int(airgradient['poll_secs']), 15)
+        for name in ['Proxy1', 'Proxy2', 'Proxy3', 'Proxy4']:
+            source = airgradient[name]
+            self.assertFalse(weeutil.weeutil.to_bool(source['enable']), name)
+            # airgradient-proxy listens on 8080, not 8000.
+            self.assertEqual(weeutil.weeutil.to_int(source['port']), 8080, name)
+            # A proxy answers from its own database on the LAN; if it has not
+            # answered in a second it is down.  This also bounds the archive
+            # backfill, which runs on the main thread once per record.
+            self.assertEqual(weeutil.weeutil.to_int(source['timeout']), 1, name)
+        self.assertEqual(airgradient['Proxy1']['hostname'], 'proxy1')
+        self.assertTrue(weeutil.weeutil.to_bool(airgradient['Sensor1']['enable']))
+        self.assertFalse(weeutil.weeutil.to_bool(airgradient['Sensor2']['enable']))
+        for name in ['Sensor1', 'Sensor2']:
+            source = airgradient[name]
+            self.assertEqual(weeutil.weeutil.to_int(source['port']), 80, name)
+            self.assertEqual(weeutil.weeutil.to_int(source['timeout']), 15, name)
+        self.assertEqual(airgradient['Sensor1']['hostname'], 'airgradient')
+        self.assertEqual(airgradient['Sensor2']['hostname'], 'airgradient2')
+
+    def test_stanza_carries_comments(self):
+        """The point of building the stanza from a ConfigObj: weectl writes
+        the comments into a fresh weewx.conf, so each option arrives with a
+        line saying what it does."""
+        config = self.installer_config()
+        self.assertTrue(config['AirGradient'].comments['poll_secs'])
+        self.assertTrue(config['AirGradient']['Proxy1'].comments['timeout'])
+
+    def test_version_matches_the_module(self):
+        importlib.import_module('weecfg.extension')
+        spec = importlib.util.spec_from_file_location(
+            'airgradient_install_version', os.path.join(self.REPO_DIR, 'install.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.AirGradientInstaller()['version'],
+                         user.airgradient.WEEWX_AIRGRADIENT_VERSION)
 
 if __name__ == '__main__':
     unittest.main()

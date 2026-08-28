@@ -1,0 +1,6 @@
+# GitHub Pages configuration for https://chaunceygardiner.github.io/weewx-airgradient/
+theme: jekyll-theme-primer
+title: weewx-airgradient
+description: "AirGradient air quality for WeeWX -- particulates, CO2, TVOC and NOx in every loop packet, AQI computed on demand, and archive gaps filled from a proxy's history"
+plugins:
+  - jekyll-sitemap

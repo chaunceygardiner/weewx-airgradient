@@ -1,8 +1,63 @@
 weewx-airgradient change history
 --------------------------------
 
-2.x (in development)
---------------------
+3.0 08/27/2026
+--------------
+- ACTION REQUIRED for existing installations that poll an
+  airgradient-proxy: change timeout to 1 in every [[ProxyN]] section of
+  weewx.conf.  A proxy answers out of its own database on the local
+  network, so a second is ample; if it has not answered by then, it is
+  down.  This matters more than it used to: the same timeout now governs
+  the archive backfill below, which runs on WeeWX's main thread once per
+  archive record, and a long catchup would otherwise wait out the timeout
+  for every record.  New installs are written with timeout = 1, and a
+  [[ProxyN]] section that specifies no timeout at all now defaults to 1
+  rather than 10; an upgrade never alters an existing weewx.conf.
+- Archive records for periods WeeWX was not running for -- the records a
+  logger hands over at startup catchup -- now have this extension's
+  fields filled in from an airgradient-proxy's archive history, so an
+  outage no longer leaves a gap in those columns.  Exactly the fields in
+  [[LoopFields]] are filled, with exactly the values the live path would
+  have written; a backfilled pm2_5 restores pm2_5_aqi and
+  pm2_5_aqi_color for that period too, since the AQI xtype computes them
+  from what is stored.  Only periods this extension contributed no
+  readings to are touched; a period WeeWX did see keeps the average it
+  computed.  For a period that has just closed and that no proxy has
+  archived yet, the proxy's two minute average stands in, but only if the
+  two minutes it covers reach into that period.  For any period further
+  back that no proxy can answer for, the columns are left empty rather
+  than filled with a value that says nothing about that period.  This
+  requires a proxy: with only directly-polled monitors configured there
+  is no history to ask for, and nothing changes.
+- The startup log now reports the archive interval this extension is
+  working from, alongside poll_secs and fresh_secs.  It is the interval
+  WeeWX itself archives on -- the console's under hardware record
+  generation, weewx.conf's under software -- and it sets the window used
+  for a record that arrives without one.
+- The configuration stanza install.py writes into weewx.conf on a fresh
+  install now carries explanatory comments -- what poll_secs does, why
+  [[LoopFields]] ships empty, which values are placeholders to replace.
+  Existing installations are unaffected; the values themselves are
+  unchanged apart from the proxy timeout above.
+- The demo skin now ships the OpenSans fonts (as WeeWX's Seasons skin
+  does) and points [ImageGenerator] at them.  WeeWX's built-in bitmap
+  font cannot draw the micro sign or the superscript three, so every
+  concentration plot has been labelling its y axis with two empty boxes
+  instead of ug/m3.  Upgrading replaces the bundled skin, so the fix
+  arrives with it.
+- The demo report screenshot in the README and the manual has been
+  recaptured.  The old one dated from October 2025 and still showed the
+  "Total Volatile Organix Compounds Index" label typo that was fixed in
+  2.0.
+- A user manual is published at
+  https://chaunceygardiner.github.io/weewx-airgradient/ (GitHub Pages,
+  served from docs/): overview, installation, configuration, filling gaps
+  after downtime, fields in reports, and troubleshooting.  The README
+  links to it.
+- airgradient-proxy is now recommended rather than discouraged: its
+  archive history is the only thing that can recover an archive period
+  WeeWX missed.  The README says so, and documents setting the proxy's
+  archive-interval-secs to match WeeWX's archive interval.
 - Insane readings are now logged as warnings (were logged as info).
 
 2.0.1 07/19/2026
