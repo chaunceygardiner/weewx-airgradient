@@ -60,13 +60,15 @@ graphs that draw them.  See
 
 ## The demo report
 
-A small demo report is installed at `<HTML_ROOT>/airgradient`:
+A small demo report is installed at `<HTML_ROOT>/airgradient`.  It is
+translatable and ships German, French, Dutch and Spanish — see
+[Translating the demo page](i18n.md).
 
 ![The demo page](https://raw.githubusercontent.com/chaunceygardiner/weewx-airgradient/master/AirGradientReport.png)
 
 ## Requirements
 
-* WeeWX 4 or 5
+* WeeWX 4.6 or later (4.6 through 4.10, or any WeeWX 5)
 * Python 3.9 or greater
 * The [wview_extended](https://github.com/weewx/weewx/blob/master/src/schemas/wview_extended.py)
   schema (it contains the `pm1_0`, `pm2_5`, `pm10_0` and `co2` columns)

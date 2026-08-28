@@ -1,7 +1,7 @@
 ---
 title: Troubleshooting
 layout: default
-nav_order: 6
+nav_order: 7
 description: Log messages, the manual collector harness, and running the hermetic test suite.
 ---
 
@@ -41,6 +41,19 @@ answer for them — see [Filling gaps after downtime](gaps.md).  With no
 `[[ProxyN]]` configured nothing is filled, and the log says nothing about it.
 With one configured, look for `Backfilled ...` or `No proxy data with which
 to fill ...` at the time WeeWX restarted.
+
+## The demo page is still in English after setting `lang`
+
+Check that `lang = de` sits under the report's own section (`[StdReport]`
+`[[AirGradientReport]]`) or under `[[Defaults]]`, and that the skin ships
+that language — English,
+German, French, Dutch and Spanish do; anything else falls back to English,
+silently and per string.  The plot titles live in the PNGs, so they change
+only as the images regenerate, and WeeWX redraws a plot only once it is
+older than its own aggregation interval: the day plots on the next report
+cycle, the week plots within an hour, the month plots within three hours,
+the year plot within a day.  See
+[Translating the demo page](i18n.md).
 
 ## Watching what the collector sees
 

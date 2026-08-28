@@ -21,7 +21,7 @@ import configobj
 
 import weewx
 
-from setup import ExtensionInstaller
+from weecfg.extension import ExtensionInstaller
 
 CONFIG="""
 [StdReport]
@@ -102,19 +102,42 @@ CONFIG="""
 
 airgradient_dict = configobj.ConfigObj(StringIO(CONFIG))
 
+# Kept in step with the copy in bin/user/airgradient.py; install.py cannot
+# import the extension.
+def weewx_version_at_least(minimum):
+    """Is the running WeeWX at least `minimum` (e.g. (4, 6))?
+
+    Compared as integers, not as text: WeeWX 4.10 sorts BELOW "4.6" as a
+    string, so a plain comparison would reject the whole 4.10 series (the
+    last of WeeWX 4).  weeutil's own version_compare cannot be used here --
+    it arrived after 4.6, so it is missing from some of the versions this
+    has to reject.
+    """
+    running = []
+    for chunk in weewx.__version__.split('.')[:len(minimum)]:
+        digits = ''
+        for char in chunk:
+            if not char.isdigit():
+                break
+            digits += char
+        running.append(int(digits) if digits else 0)
+    return tuple(running) >= minimum
+
 def loader():
     if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 9):
         sys.exit("weewx-airgradient requires Python 3.9 or later, found %s.%s" % (sys.version_info[0], sys.version_info[1]))
 
-    if weewx.__version__ < "4":
-        sys.exit("weewx-airgradient requires WeeWX 4, found %s" % weewx.__version__)
+    # The demo skin's template uses $lang and $gettext, which arrived in
+    # WeeWX 4.6.0; below that they render into the page verbatim.
+    if not weewx_version_at_least((4, 6)):
+        sys.exit("weewx-airgradient requires WeeWX 4.6 or later, found %s" % weewx.__version__)
 
     return AirGradientInstaller()
 
 class AirGradientInstaller(ExtensionInstaller):
     def __init__(self):
         super(AirGradientInstaller, self).__init__(
-            version="3.0",
+            version="4.0",
             name='airgradient',
             description='Record air quality readings from AirGradient monitors (or airgradient-proxy services).',
             author="John A Kline",
@@ -131,6 +154,13 @@ class AirGradientInstaller(ExtensionInstaller):
                     'skins/airgradient/font/OpenSans-Regular.ttf',
                     'skins/airgradient/font/OpenSans-Bold.ttf',
                     'skins/airgradient/font/license.txt',
+                ]),
+                ('skins/airgradient/lang', [
+                    'skins/airgradient/lang/en.conf',
+                    'skins/airgradient/lang/de.conf',
+                    'skins/airgradient/lang/fr.conf',
+                    'skins/airgradient/lang/nl.conf',
+                    'skins/airgradient/lang/es.conf',
                 ]),
             ]
         )

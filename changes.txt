@@ -1,6 +1,69 @@
 weewx-airgradient change history
 --------------------------------
 
+4.0 08/28/2026
+--------------
+- ACTION REQUIRED: this release requires WeeWX 4.6 or later (4.6 was
+  released 02/04/2022; the whole 4.10 series and every WeeWX 5 qualify).
+  The floor was 4, and both install.py and the extension now refuse to
+  run below 4.6 rather than installing and rendering a broken page.  The
+  demo skin's template uses $lang and $gettext, which arrived in WeeWX
+  4.6.0; below that Cheetah leaves them undefined and #errorCatcher Echo
+  writes them into the page verbatim, so the page shows a literal
+  $gettext("Day") instead of a tab and fails HTML validation.  It is not
+  a graceful fall back to English.  If you are on WeeWX 4.0 through 4.5,
+  upgrade WeeWX before installing this release.
+- The demo report is now translatable, through WeeWX's own mechanisms:
+  lang files and gettext-style [Texts] keys, exactly as WeeWX's bundled
+  Seasons skin does it.  The English string is the key, and a report
+  falls back to English one string at a time, so a partial translation
+  renders fine.  Everything the page shows is covered: the page title and
+  heading, the "Unavailable" placeholder, the Day/Week/Month/Year tabs,
+  and the observation labels that title each plot.  The unit labels that
+  ride alongside -- " AQI", " RGB", " TVOC Index", " NOx Index" -- are
+  registered by the extension itself rather than by the skin, so they are
+  not translatable from a lang file and stay in English.
+- German, French, Dutch and Spanish ship with the skin
+  (skins/airgradient/lang/de.conf, fr.conf, nl.conf and es.conf).  Select
+  one per report in weewx.conf:
+
+      [StdReport]
+          [[AirGradientReport]]
+              lang = de                # or fr, nl, or es
+
+  [StdReport] [[Defaults]] lang = de instead switches every skin that
+  ships German at once.  Each translation is complete and kept complete
+  by a test, so a new string cannot ship untranslated, and the
+  plot-period tabs are the same words WeeWX's own Seasons skin uses.
+  Corrections welcome -- file an issue at
+  https://github.com/chaunceygardiner/weewx-airgradient/issues.
+- To add a language, copy skins/airgradient/lang/en.conf -- the reference
+  dictionary, which a test keeps to exactly the strings the page renders
+  -- translate the values, and point the report at it with lang = <code>.
+  No code is involved.
+- Each language also localizes the year plot's date axis: day-month
+  rather than the US month/day order, and lang/en.conf restates the US
+  order, so a report set back to lang = en under a station-wide
+  [[Defaults]] lang gets an English year axis rather than keeping the
+  previous language's.
+- The page's lang attribute is reduced to a bare language tag, so a
+  locale-style setting such as lang = de_DE.UTF-8 -- which WeeWX 5.1 and
+  later accept, and load lang/de.conf for -- yields lang="de" rather than
+  an invalid one.
+- The PM2.5 plot is now labelled "PM2.5" ("PM2,5" in the decimal-comma
+  languages) rather than "Concentration of Particles < 2.5 Micrometers",
+  which no longer fit once the label had to work in five languages.
+- The manual has a new page, "Translating the demo page", covering all of
+  the above: https://chaunceygardiner.github.io/weewx-airgradient/i18n.html
+- The demo-report screenshot in the README and the manual was recaptured,
+  since the PM2.5 plot's title changed.
+- The README leads with what the extension is for rather than how it
+  works: a new title line, a "What it is" opener, gap filling as a
+  headline feature, the demo screenshot as the page's opening image, and
+  the family's three buttons (manual, download, issues) in place of the
+  plain text links.  airgradient-proxy is no longer the second thing the
+  page names; it keeps its own section and its Requires bullet.
+
 3.0 08/27/2026
 --------------
 - ACTION REQUIRED for existing installations that poll an

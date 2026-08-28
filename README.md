@@ -1,18 +1,45 @@
-# weewx-airgradient
-
-A WeeWX extension that reads an [AirGradient](https://www.airgradient.com/)
-air quality monitor on the local network (or an
-[airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)
-service) and inserts the readings — particulates, CO2, TVOC, NOx and more —
-into every WeeWX loop packet.
+# weewx-airgradient — Know the air around you
+Open source plugin for WeeWX software.
 
 Copyright (C) 2025-2026 by John A Kline (john@johnkline.com)
 
-[User manual](https://chaunceygardiner.github.io/weewx-airgradient/) ·
-[GitHub project](https://github.com/chaunceygardiner/weewx-airgradient)
+[![Read the manual](assets/btn-manual.svg)](https://chaunceygardiner.github.io/weewx-airgradient/)
+[![Download weewx-airgradient.zip](assets/btn-download.svg)](https://github.com/chaunceygardiner/weewx-airgradient/releases/latest/download/weewx-airgradient.zip)
+[![Report an issue](assets/btn-issue.svg)](https://github.com/chaunceygardiner/weewx-airgradient/issues)
+
+## What it is
+
+weewx-airgradient puts the air you are actually in on your WeeWX site — not
+just the smoke and dust outside, but the CO2 climbing in the room you are
+sitting in.
+
+Particulates and CO2 land in every loop packet and every archive record with
+no database work at all — they are already columns in the standard WeeWX
+schema — so those graphs sit alongside temperature and rain, and the current
+AQI, with its official EPA color, is available anywhere in your reports and
+templates.  TVOC and NOx ride in the loop packets too, and a few lines of
+config give them columns of their own.
+
+You choose which readings to take and what to call them, so one
+[AirGradient](https://www.airgradient.com/) indoors and another outdoors each
+report what matters where they stand.  CO2 is the one you act on the same
+hour you see it: a closed room climbs past a thousand parts per million
+faster than anyone expects, and the graph tells you to open a window before
+the headache does.
+
+**Downtime leaves no hole.**  A restart, a reboot, a power cut:
+weewx-airgradient goes back and fills its readings into the records WeeWX
+missed (this needs the author's
+[airgradient-proxy](https://github.com/chaunceygardiner/airgradient-proxy)),
+so nothing is left blank in the columns or in the graphs that draw them.
+The catch-up records your logger hands over when WeeWX returns carry no air
+quality data of their own — nothing was running to supply any.  See
+[Filling gaps after downtime](#filling-gaps-after-downtime).
+
+![The demo page](AirGradientReport.png)
 
 **Requires:**
-* WeeWX 4 or 5
+* WeeWX 4.6 or later (4.6 through 4.10, or any WeeWX 5)
 * Python 3.9 or greater
 * The [wview_extended](https://github.com/weewx/weewx/blob/master/src/schemas/wview_extended.py)
   schema (it contains the `pm1_0`, `pm2_5`, `pm10_0` and `co2` columns)
@@ -32,7 +59,7 @@ table, e.g.:
 echo '.schema archive' | sqlite3 /var/lib/weewx/weewx.sdb | grep pm2_5
 ```
 
-## What it does
+## What lands in your loop packets
 
 With the suggested `[LoopFields]` mapping (shown in Configuration below),
 every loop packet is populated with:
@@ -41,7 +68,7 @@ every loop packet is populated with:
 |-------------|-------------------|-------------------------------------------------|
 | `pm1_0`     | `pm01`            | PM1.0 concentration (µg/m³)                     |
 | `pm2_5`     | `pm02Compensated` | PM2.5 concentration (µg/m³), compensated        |
-| `pm10_0`    | `pm10`            | PM10.0 concentration (µg/m³)                    |
+| `pm10_0`    | `pm10`            | PM10 concentration (µg/m³)                      |
 | `co2`       | `rco2`            | CO2 (ppm)                                       |
 | `tvocIndex` | `tvocIndex`       | Sensirion TVOC index                            |
 | `tvoc`      | `tvocRaw`         | TVOC raw value                                  |
@@ -109,9 +136,31 @@ provides it), turn it off:
 
 ### Demo skin
 
-A small demo report is installed at `<HTML_ROOT>/airgradient`:
+A small demo report is installed at `<HTML_ROOT>/airgradient` — the page
+shown at the top of this README.  It is translatable and ships German,
+French, Dutch and Spanish; see [Translations](#translations).
 
-![AirGradientReport](AirGradientReport.png)
+### Translations
+
+The demo report is translatable through WeeWX's own mechanisms — lang files
+and gettext-style `[Texts]` keys (the English string is the key; a missing
+entry falls back to English one string at a time).  German, French, Dutch and
+Spanish ship (`skins/airgradient/lang/de.conf`, `fr.conf`, `nl.conf`,
+`es.conf`; corrections welcome —
+[file an issue](https://github.com/chaunceygardiner/weewx-airgradient/issues));
+select one per report in `weewx.conf`:
+
+```
+[StdReport]
+    [[AirGradientReport]]
+        lang = de                # or fr, nl, or es
+```
+
+`[StdReport] [[Defaults]] lang = de` instead switches every skin that ships
+German at once; a skin lacking the language is a logged no-op, not an error.
+To add a language, copy
+`skins/airgradient/lang/en.conf` — the reference dictionary, kept exact by a
+test — and translate the values.
 
 ### What's airgradient-proxy?
 

@@ -10,6 +10,7 @@ import importlib
 import importlib.util
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -18,6 +19,8 @@ import unittest
 
 from typing import Any, Dict
 from unittest import mock
+
+import configobj
 
 import weeutil.logger
 import weeutil.weeutil
@@ -1832,18 +1835,18 @@ class TestInstallerConfig(unittest.TestCase):
     REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     @classmethod
-    def installer_config(cls):
-        """install.py's config stanza, whichever form it is written in.
-        Loading it needs weecfg.extension imported first: that module aliases
-        itself as 'setup' in sys.modules for installers written against the
-        pre-5.0 name, which is what install.py's own import resolves
-        through."""
-        importlib.import_module('weecfg.extension')  # registers the alias
+    def installer_module(cls):
+        """install.py, loaded as a module."""
         spec = importlib.util.spec_from_file_location(
             'airgradient_install', os.path.join(cls.REPO_DIR, 'install.py'))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.AirGradientInstaller()['config']
+        return module
+
+    @classmethod
+    def installer_config(cls):
+        """install.py's config stanza, whichever form it is written in."""
+        return cls.installer_module().AirGradientInstaller()['config']
 
     def test_html_root_is_a_bare_subdirectory(self):
         """HTML_ROOT must NOT carry a public_html prefix.  weecfg prepends the
@@ -1907,13 +1910,256 @@ class TestInstallerConfig(unittest.TestCase):
         self.assertTrue(config['AirGradient']['Proxy1'].comments['timeout'])
 
     def test_version_matches_the_module(self):
-        importlib.import_module('weecfg.extension')
-        spec = importlib.util.spec_from_file_location(
-            'airgradient_install_version', os.path.join(self.REPO_DIR, 'install.py'))
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self.assertEqual(module.AirGradientInstaller()['version'],
+        """The version lives in THREE places and they must not drift:
+        install.py, WEEWX_AIRGRADIENT_VERSION, and the skin's [Extras]
+        version.  Without the third, a release that forgets skin.conf ships
+        a stale version silently -- nothing else reads it."""
+        self.assertEqual(self.installer_module().AirGradientInstaller()['version'],
                          user.airgradient.WEEWX_AIRGRADIENT_VERSION)
+        skin = configobj.ConfigObj(
+            os.path.join(self.REPO_DIR, 'skins', 'airgradient', 'skin.conf'),
+            encoding='utf-8', file_error=True)
+        self.assertEqual(skin['Extras']['version'],
+                         user.airgradient.WEEWX_AIRGRADIENT_VERSION)
+
+    def test_imports_extension_installer_canonically(self):
+        """`from weecfg.extension import ExtensionInstaller`, never
+        `from setup import ...`.  WeeWX's own bundled examples have used the
+        canonical form since at least 4.6.0, and `weecfg.extension` carries
+        ExtensionInstaller at every version this extension supports.  The
+        `setup` name only resolves through a compatibility shim WeeWX added
+        on 2023-01-30 (`sys.modules['setup'] = sys.modules[__name__]`), which
+        is absent from 4.6.0 through 4.10.0 -- so the legacy spelling would
+        fail across most of the supported range, and weecfg would report it
+        as the misleading \"Cannot find 'install' module\"."""
+        with open(os.path.join(self.REPO_DIR, 'install.py'),
+                  encoding='utf-8') as f:
+            source = f.read()
+        self.assertIn('from weecfg.extension import ExtensionInstaller', source)
+        self.assertNotIn('from setup import', source)
+
+class TestWeewxVersionAtLeast(unittest.TestCase):
+    """The WeeWX 4.6 floor.  The demo skin's template uses $lang and
+    $gettext, which arrived in WeeWX 4.6.0; below that Cheetah's
+    `#errorCatcher Echo` renders them into the page verbatim, so the page
+    is visibly broken rather than falling back to English."""
+
+    # 'unknown' stands for a version string with no digits at all: it must
+    # be refused, not crash.  '4.5b1'/'4.6b1' put the non-digit inside a
+    # chunk that is actually compared, which the .0b1 forms never do.
+    REJECT = ['3.9.2', '4', '4.0.0', '4.5.1', '4.5.1a1', '4.5b1', 'unknown']
+    ACCEPT = ['4.6', '4.6.0', '4.6.2', '4.6b1', '4.9.1', '4.10.0', '4.10.2',
+              '5', '5.0.0', '5.1.0b1', '5.5.0']
+
+    def check(self, version):
+        with mock.patch.object(weewx, '__version__', version):
+            return user.airgradient.weewx_version_at_least((4, 6))
+
+    def test_rejects_below_4_6(self):
+        for version in self.REJECT:
+            self.assertFalse(self.check(version), version)
+
+    def test_accepts_4_6_and_later(self):
+        for version in self.ACCEPT:
+            self.assertTrue(self.check(version), version)
+
+    def test_the_string_comparison_trap(self):
+        """Why this helper exists at all: WeeWX 4.10 -- the last WeeWX 4
+        series -- sorts below "4.6" as text, so `weewx.__version__ < "4.6"`
+        would refuse the newest WeeWX 4 releases."""
+        self.assertTrue('4.10.0' < '4.6')
+        self.assertTrue('4.10.2' < '4.6')
+        self.assertTrue(self.check('4.10.0'))
+        self.assertTrue(self.check('4.10.2'))
+
+    def test_installer_guard_matches_the_module(self):
+        """install.py carries its own copy -- it cannot import the
+        extension -- so the two must agree on every version."""
+        module = TestInstallerConfig.installer_module()
+        for version in self.REJECT + self.ACCEPT:
+            with mock.patch.object(weewx, '__version__', version):
+                self.assertEqual(module.weewx_version_at_least((4, 6)),
+                                 user.airgradient.weewx_version_at_least((4, 6)),
+                                 version)
+
+
+class TestI18n(unittest.TestCase):
+    """The demo skin's translation plumbing -- the same machinery
+    weewx-purple/skyfield/celestial/loopdata ship: [Texts] is gettext-style
+    (the English string IS the key; a report falls back to it one string at a
+    time) and observation labels ride [Labels] [[Generic]].  Both live only
+    in lang/<lang>.conf; skin.conf repeats neither, because a string in both
+    places would shadow its own translation.  Unit labels are NOT part of
+    this -- see test_no_lang_file_carries_unit_labels."""
+
+    REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    SKIN_DIR = os.path.join(REPO_DIR, 'skins', 'airgradient')
+    LANG_DIR = os.path.join(SKIN_DIR, 'lang')
+    LANGUAGES = ['en', 'de', 'fr', 'nl', 'es']
+
+    @classmethod
+    def lang_conf(cls, name: str) -> configobj.ConfigObj:
+        return configobj.ConfigObj(os.path.join(cls.LANG_DIR, name),
+                                   encoding='utf-8', file_error=True)
+
+    @classmethod
+    def rendered_keys(cls):
+        """Every translation key the page can render, read from the
+        $gettext("...")/$gettext(\'...\') literals in the template (keys are
+        single-line literals by convention)."""
+        with open(os.path.join(cls.SKIN_DIR, 'index.html.tmpl'),
+                  encoding='utf-8') as f:
+            found = re.findall(r'\$gettext\(\s*(?:"([^"]+)"|\'([^\']+)\')\s*\)',
+                               f.read())
+        assert found
+        return {a or b for a, b in found}
+
+    def test_installer_lists_lang_files(self):
+        # Scrape the source rather than reading the loaded module: the file
+        # list is what must be right, and a typo'd path would still import.
+        with open(os.path.join(self.REPO_DIR, 'install.py'),
+                  encoding='utf-8') as f:
+            installed = set(re.findall(r"'skins/airgradient/lang/(\w+\.conf)'",
+                                       f.read()))
+        on_disk = {name for name in os.listdir(self.LANG_DIR)
+                   if name.endswith('.conf')}
+        self.assertEqual(installed, on_disk)
+        self.assertEqual(on_disk, {lang + '.conf' for lang in self.LANGUAGES})
+
+    def test_en_conf_ships_exactly_what_renders(self):
+        """Both directions: a rendered key missing from lang/en.conf fails,
+        and an en.conf key nothing renders fails -- the English file is the
+        reference dictionary for translators."""
+        conf = self.lang_conf('en.conf')
+        shipped = dict(conf['Texts'])
+        rendered = self.rendered_keys()
+        self.assertEqual(sorted(rendered - set(shipped)), [],
+                         'rendered but not in en.conf')
+        self.assertEqual(sorted(set(shipped) - rendered), [],
+                         'in en.conf but never rendered')
+        # English is the identity translation: every value equals its key.
+        self.assertEqual([k for k, v in shipped.items() if v != k], [])
+        # en.conf is the only home for the observation labels.
+        self.assertEqual(sorted(conf['Labels']['Generic']),
+                         ['co2', 'nox', 'noxIndex', 'pm2_5', 'pm2_5_aqi',
+                          'tvoc', 'tvocIndex'])
+
+    def test_skin_conf_repeats_no_translatable_string(self):
+        """skin.conf must carry no [Labels], [Texts] or [Units] [[Labels]].
+
+        WeeWX merges the lang file named by skin.conf's own `lang` line
+        BEFORE it merges the rest of skin.conf (reportengine._build_skin_dict),
+        so any translatable string left in skin.conf shadows its own
+        translation: `lang = de` there used to give a German title and tabs
+        beside an English "Air Quality Index" heading and English plot
+        titles.  Keeping the lang files as the single source removes the
+        cause rather than documenting it."""
+        skin = configobj.ConfigObj(os.path.join(self.SKIN_DIR, 'skin.conf'),
+                                   encoding='utf-8', file_error=True)
+        self.assertNotIn('Labels', skin)
+        self.assertNotIn('Texts', skin)
+        self.assertNotIn('Labels', skin.get('Units', {}))
+        # The year axis format is language-specific too, and shadows the
+        # same way: a value here beat de.conf's %d.%m. whenever lang was
+        # chosen in skin.conf.  day/week/month legitimately keep theirs --
+        # %H:%M and %d are language-neutral and no lang file overrides them.
+        self.assertNotIn('x_label_format',
+                         skin['ImageGenerator']['year_images'])
+        for period in ['day_images', 'week_images', 'month_images']:
+            self.assertIn('x_label_format', skin['ImageGenerator'][period],
+                          period)
+
+    def test_lang_files_consistent(self):
+        """Every shipped lang file must parse, translate exactly en.conf's
+        keys (a stale key would silently never render; a missing one ships
+        an untranslated string), and carry the same [Labels] keys."""
+        en = self.lang_conf('en.conf')
+        for lang in self.LANGUAGES:
+            conf = self.lang_conf(lang + '.conf')
+            self.assertEqual(set(conf['Texts']), set(en['Texts']), lang)
+            for key, val in dict(conf['Texts']).items():
+                self.assertIsInstance(val, str, (lang, key))
+                self.assertTrue(val, (lang, key))
+            self.assertEqual(set(conf['Labels']['Generic']),
+                             set(en['Labels']['Generic']), lang)
+
+    def test_no_lang_file_carries_unit_labels(self):
+        """A [Units] [[Labels]] block in a lang file would be dead text.
+        weewx.units.Formatter.get_label_string consults
+        weewx.units.default_unit_label_dict FIRST and only then the
+        skin/lang dictionary, and airgradient.py registers aqi, aqi_color,
+        tvoc_index and nox_index into that dict at import time -- so a
+        translation of those four could never render, while looking for all
+        the world like it had been translated.  This shipped in a draft of
+        4.0: the German page drew German plot titles beside y axes still
+        reading "TVOC Index" and "NOx Index"."""
+        for lang in self.LANGUAGES:
+            conf = self.lang_conf(lang + '.conf')
+            self.assertNotIn('Units', conf, lang)
+        # And the precedence this rests on, so the test fails loudly if a
+        # future WeeWX ever reverses it.
+        formatter = weewx.units.Formatter(
+            unit_label_dict={'tvoc_index': ' NOT THIS ONE'})
+        self.assertEqual(formatter.get_label_string('tvoc_index'),
+                         weewx.units.default_unit_label_dict['tvoc_index'])
+
+    def test_every_lang_file_sets_the_year_axis_format(self):
+        """Including en.conf.  Merge order is lang file -> [[Defaults]] ->
+        report section, so a station running [[Defaults]] lang = de with
+        lang = en on this report merges the German %d.%m. first; if en.conf
+        were silent, nothing would put the US order back and the English
+        page would carry a German year axis."""
+        for lang in self.LANGUAGES:
+            conf = self.lang_conf(lang + '.conf')
+            self.assertIn('ImageGenerator', conf, lang)
+            fmt = conf['ImageGenerator']['year_images']['x_label_format']
+            self.assertTrue(fmt, lang)
+        # en carries the US month/day order, which is what skin.conf used
+        # to hold before it had to stop shadowing the translations.
+        self.assertEqual(
+            self.lang_conf('en.conf')['ImageGenerator']['year_images']['x_label_format'],
+            '%m/%d')
+
+    def test_html_lang_is_reduced_to_a_bare_language_tag(self):
+        """WeeWX 5.1+ accepts locale-style specs (de_DE.UTF-8) and loads
+        de.conf for them, and its own SkinInfo strips the country -- but only
+        the country (.split('_')[0]), and only from 5.x.  Below that the raw
+        spec reaches the lang attribute, where it is not a valid BCP 47 tag.
+        The template must reduce it rather than emit $lang directly, and it
+        strips the encoding too, which WeeWX itself does not."""
+        with open(os.path.join(self.SKIN_DIR, 'index.html.tmpl'),
+                  encoding='utf-8') as f:
+            tmpl = f.read()
+        self.assertIn("#set $html_lang = $lang.split('.')[0].split('_')[0]",
+                      tmpl)
+        self.assertIn('<html lang="$html_lang">', tmpl)
+        self.assertNotIn('<html lang="$lang">', tmpl)
+        # And the reduction itself, on the forms WeeWX documents.
+        for spec, expected in [('en', 'en'), ('de', 'de'), ('de_DE', 'de'),
+                               ('de_DE.UTF-8', 'de'), ('en_AU.utf8', 'en')]:
+            self.assertEqual(spec.split('.')[0].split('_')[0], expected, spec)
+
+    def test_matches_weewx_seasons_vocabulary(self):
+        """The plot-period tabs are copied from WeeWX's own Seasons lang
+        files; if a sibling weewx checkout is present, pin them to it."""
+        seasons_lang = os.path.join(self.REPO_DIR, '..', 'weewx', 'src',
+                                    'weewx_data', 'skins', 'Seasons', 'lang')
+        if not os.path.isdir(seasons_lang):
+            self.skipTest('no ../weewx checkout')
+        ours = self.rendered_keys()
+        for lang in self.LANGUAGES:
+            if lang == 'en':
+                continue
+            seasons = configobj.ConfigObj(
+                os.path.join(seasons_lang, lang + '.conf'),
+                encoding='utf-8', file_error=True)
+            conf = self.lang_conf(lang + '.conf')
+            shared = ours & set(seasons['Texts'])
+            self.assertEqual(shared, {'Day', 'Week', 'Month', 'Year'}, lang)
+            for key in shared:
+                self.assertEqual(conf['Texts'][key], seasons['Texts'][key],
+                                 (lang, key))
+
 
 if __name__ == '__main__':
     unittest.main()

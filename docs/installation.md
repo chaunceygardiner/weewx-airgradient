@@ -13,7 +13,7 @@ description: Requirements and step-by-step installation of the weewx-airgradient
 
 ## Requirements
 
-* WeeWX 4 or 5
+* WeeWX 4.6 or later (4.6 through 4.10, or any WeeWX 5)
 * Python 3.9 or greater
 * The [wview_extended](https://github.com/weewx/weewx/blob/master/src/schemas/wview_extended.py)
   schema (it contains the `pm1_0`, `pm2_5`, `pm10_0` and `co2` columns)
@@ -96,7 +96,10 @@ echo '.schema archive' | sqlite3 /var/lib/weewx/weewx.sdb | grep pm2_5
 
 ## Upgrading
 
-Upgrading replaces the bundled skin (`skins/airgradient/`) — if you
-customized it, save a copy first.  An upgrade never rewrites your existing
-`weewx.conf`, so any option added by a new release keeps its old value until
-you change it yourself; the release notes call out when that matters.
+Upgrading replaces the bundled skin (`skins/airgradient/`) — including its
+`lang/` files — so if you customized it, save a copy first.  Label and text
+overrides written into `weewx.conf` instead survive an upgrade; see
+[Translating the demo page](i18n.md).  An upgrade never rewrites your
+existing `weewx.conf`, so any option added by a new release keeps its old
+value until you change it yourself; the release notes call out when that
+matters.
