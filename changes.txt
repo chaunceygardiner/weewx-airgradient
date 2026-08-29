@@ -1,6 +1,35 @@
 weewx-airgradient change history
 --------------------------------
 
+4.0.1 (in development)
+----------------------
+- The options weewx-airgradient has its own default for -- poll_secs, and
+  each source's port and timeout -- are now written into weewx.conf
+  COMMENTED OUT rather than live.  Existing installations are untouched: an
+  upgrade never rewrites an existing weewx.conf, so whatever your
+  [AirGradient] section says today it goes on saying.  On a fresh install
+  the option is visible with the value it is set to, but it is the
+  extension that supplies that value, so a station that leaves it commented
+  follows the default forward if a later release improves it; uncommenting
+  it pins the station to the value written there.  What stays live is each
+  source's enable and hostname -- the switch and the placeholder you have to
+  replace with your own -- and the [StdReport] entries the report engine
+  needs.  Each hostname's comment now leads with PLACEHOLDER, so the one
+  kind of line that breaks the extension if you leave it alone says so first
+  rather than last.
+- A monitor's default http timeout is now 15 seconds rather than 10, which
+  is the value the installer has written into every [[SensorN]] section
+  since the first release.  Nothing changes for a fresh install, and nothing
+  changes for any [[SensorN]] the installer wrote -- its weewx.conf already
+  says 15.  The one case that does change is a [[SensorN]] you added by hand
+  without a timeout of its own: it was getting 10 and now gets 15.  The
+  number simply now lives in one place instead of two, which is what lets it
+  be shown commented out.
+- The --test-collector diagnostic now uses the same 15 second timeout the
+  extension itself uses for a monitor.  It had been fixed at 10, so the tool
+  you are told to reach for when a monitor is not answering could time out
+  against a monitor the extension was polling successfully.
+
 4.0 08/28/2026
 --------------
 - ACTION REQUIRED: this release requires WeeWX 4.6 or later (4.6 was

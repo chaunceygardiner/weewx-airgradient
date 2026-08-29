@@ -23,6 +23,15 @@ import weewx
 
 from weecfg.extension import ExtensionInstaller
 
+# Written as weewx.conf text rather than a dict so that the stanza weectl
+# merges into a fresh weewx.conf arrives with its comments: ConfigObj keeps
+# them, a dict has nowhere to put them.
+#
+# ORDER MATTERS: ConfigObj attaches a comment block to the NEXT key, so a
+# commented-out option must be followed by a live key IN THE SAME SECTION.
+# Last in its section, it attaches to whatever section comes next and is
+# re-indented to the parent's level, landing outside the block it documents.
+# Hence hostname last in every source section.
 CONFIG="""
 [StdReport]
     [[AirGradientReport]]
@@ -36,9 +45,14 @@ CONFIG="""
 [AirGradient]
     # This section is for configuring the extension weewx-airgradient.
     # See the README.md for details.
+    #
+    # An option shown commented out is one the extension supplies itself.
+    # Leave it commented and the extension's own value governs, including
+    # a better one a later release might bring.  Uncomment it to pin this
+    # station to the value written here.
 
     # How often to poll the sensor/proxy, in seconds.
-    poll_secs = 15
+    #poll_secs = 15
 
     # Which AirGradient readings to insert into loop packets, and what to call
     # them there: <airgradient-field> = <weewx-field>.
@@ -57,47 +71,66 @@ CONFIG="""
     # in the README.
     [[Proxy1]]
         enable = False
-        # Replace with the host name or IP address of the first proxy
-        hostname = proxy1
         # The port airgradient-proxy listens on
-        port = 8080
+        #port = 8080
         # http timeout (seconds).  A proxy answers out of its own database on
         # the local network, so a second is ample; if it has not answered by
         # then, it is down.  This timeout also bounds the archive backfill,
         # which runs on WeeWX's main thread once per archive record.
-        timeout = 1
+        #timeout = 1
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # machine running the first airgradient-proxy
+        hostname = proxy1
     [[Proxy2]]
         enable = False
+        # The port airgradient-proxy listens on
+        #port = 8080
+        # http timeout (seconds)
+        #timeout = 1
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # machine running the second airgradient-proxy
         hostname = proxy2
-        port = 8080
-        timeout = 1
     [[Proxy3]]
         enable = False
+        # The port airgradient-proxy listens on
+        #port = 8080
+        # http timeout (seconds)
+        #timeout = 1
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # machine running the third airgradient-proxy
         hostname = proxy3
-        port = 8080
-        timeout = 1
     [[Proxy4]]
         enable = False
+        # The port airgradient-proxy listens on
+        #port = 8080
+        # http timeout (seconds)
+        #timeout = 1
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # machine running the fourth airgradient-proxy
         hostname = proxy4
-        port = 8080
-        timeout = 1
 
-    # Sensors are AirGradient monitors, polled directly.
+    # Sensors are AirGradient monitors, polled directly.  Sensor1 is enabled
+    # here so that a fresh install works with no proxy; disable it if you run
+    # a proxy and would rather not have WeeWX talk to the monitor too.
     [[Sensor1]]
         enable = True
-        # Replace with the host name or IP address of the first sensor
+        # The port the monitor's own web server listens on
+        #port = 80
+        # http timeout (seconds).  A monitor's own processor is slow and
+        # easily overwhelmed, so give it more room than a proxy.
+        #timeout = 15
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # first monitor
         hostname = airgradient
-        # Port is usually 80
-        port = 80
-        # http timeout (seconds).  A sensor's own processor is slow and
-        # easily overwhelmed, so this is generous.
-        timeout = 15
     [[Sensor2]]
         enable = False
-        # Replace with the host name or IP address of the second sensor
+        # The port the monitor's own web server listens on
+        #port = 80
+        # http timeout (seconds)
+        #timeout = 15
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # second monitor
         hostname = airgradient2
-        port = 80
-        timeout = 15
 """
 
 airgradient_dict = configobj.ConfigObj(StringIO(CONFIG))

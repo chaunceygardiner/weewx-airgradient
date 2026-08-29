@@ -16,32 +16,41 @@ explaining each option.  Point it at your monitor and fill in the mapping:
 
 ```
 [AirGradient]
-    poll_secs = 15
-    enable_aqi = true
+    # How often to poll the sensor/proxy, in seconds.
+    #poll_secs = 15
     [[LoopFields]]
+        # The install creates this section EMPTY -- these are suggestions
+        # to paste in, not what you get.
         pm01            = pm1_0
         pm02Compensated = pm2_5
         pm10            = pm10_0
         rco2            = co2
+        # These four have no column in the wview_extended schema.  Mapped
+        # as they stand they are current values only -- no archive records,
+        # aggregates or graphs.  See "Adding TVOC/NOx columns".
         tvocIndex       = tvocIndex
         tvocRaw         = tvoc
         noxIndex        = noxIndex
         noxRaw          = nox
     [[Sensor1]]
         enable = true
+        # The port the monitor's own web server listens on
+        #port = 80
+        # http timeout (seconds)
+        #timeout = 15
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # first monitor
         hostname = airgradient
-        port = 80
-        timeout = 15
     [[Sensor2]]
         enable = false
+        #port = 80
+        #timeout = 15
         hostname = airgradient2
-        port = 80
-        timeout = 15
     [[Proxy1]]
         enable = false
+        #port = 8080
+        #timeout = 1
         hostname = proxy1
-        port = 8080
-        timeout = 1
 ```
 
 | Option       | Default                    | Meaning                                       |
@@ -51,7 +60,26 @@ explaining each option.  Point it at your monitor and fill in the mapping:
 | `enable`     | false                      | Whether this source is polled                 |
 | `hostname`   |                            | Hostname or IP address of the monitor/proxy   |
 | `port`       | 80 (sensor) / 8080 (proxy) | Port to connect on                            |
-| `timeout`    | 1 (proxy) / 10 (sensor)    | HTTP timeout (seconds).  A proxy answers from its own database on the local network, so a second is ample; a monitor's own processor is slow, and the installer writes 15 for one. |
+| `timeout`    | 1 (proxy) / 15 (sensor)    | HTTP timeout (seconds).  A proxy answers from its own database on the local network, so a second is ample; a monitor's own processor is slow and easily overwhelmed, so it gets more room. |
+
+## Live options and commented-out ones
+
+The options the install writes commented out are the ones weewx-airgradient
+supplies for itself.  Leave one commented and the extension's own value
+governs, including a better one a later release might bring; uncomment it to
+pin this station to the value shown.
+
+`hostname` is written live because there is nothing to fall back on — it is
+the one you have to replace with your own, and its comment says PLACEHOLDER
+so that the one line which breaks the extension if you ignore it says so
+first.  `enable` is written live for a different reason: `Sensor1` ships
+enabled so that a fresh install works with no proxy, and that is not what an
+absent `enable` means.  Leave `enable` out of a section and that source is
+simply off.
+
+`enable_aqi` is not written into the section at all; set it to `false` (at
+the `[AirGradient]` level, beside `poll_secs`) if another extension already
+supplies `pm2_5_aqi`.
 
 ## Sources
 
@@ -81,6 +109,14 @@ weectl merges installer defaults into your existing section, which would
 inject unwanted entries into a customized mapping.
 
 [Fields in reports](fields.md) lists every AirGradient field you can map.
+
+`pm1_0`, `pm2_5`, `pm10_0` and `co2` are already columns in the
+wview_extended schema, so mapping to them needs no database work.  `tvoc`,
+`tvocIndex`, `nox` and `noxIndex` are not: mapped as they stand they are
+current values only — `$current.tvoc` works, but there are no archive
+records, no aggregates and no graphs, and nothing is logged to say so.  See
+[Adding TVOC/NOx columns to the
+database](fields.md#adding-tvocnox-columns-to-the-database-optional).
 
 Temperature fields (`atmp`, `atmpCompensated`) are reported in Celsius and
 converted to the unit system of the packet they are written into.  All

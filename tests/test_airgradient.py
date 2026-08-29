@@ -8,6 +8,7 @@ against an in-memory SQLite database."""
 import datetime
 import importlib
 import importlib.util
+import io
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ from unittest import mock
 
 import configobj
 
+import weeutil.config
 import weeutil.logger
 import weeutil.weeutil
 import weewx
@@ -511,7 +513,7 @@ class TestConfigureSources(unittest.TestCase):
     def test_defaults(self):
         sensor = make_source('Sensor1', is_proxy=False)
         self.assertEqual(sensor.port, 80)
-        self.assertEqual(sensor.timeout, 10)
+        self.assertEqual(sensor.timeout, 15)
         # airgradient-proxy's REST API listens on 8080 by default.
         proxy = make_source('Proxy1', is_proxy=True)
         self.assertEqual(proxy.port, 8080)
@@ -549,7 +551,7 @@ class TestGetReading(unittest.TestCase):
         reading = make_reading()
         with mock.patch('user.airgradient.collect_data', return_value=reading) as m:
             self.assertIs(user.airgradient.get_reading(cfg), reading)
-        m.assert_called_once_with('host', 80, 10, False)
+        m.assert_called_once_with('host', 80, 15, False)
 
     def test_disabled_source_skipped(self):
         s1 = make_source('Sensor1', enable=False, hostname='s1')
@@ -1875,39 +1877,217 @@ class TestInstallerConfig(unittest.TestCase):
         self.assertIn('LoopFields', airgradient)
         self.assertEqual(dict(airgradient['LoopFields']), {})
 
-    def test_source_defaults(self):
-        """One sensor enabled, every proxy and the second sensor off.  Values
-        are compared through to_bool/to_int because a ConfigObj stanza yields
-        strings where a plain dict yields bools and ints -- the installed
-        weewx.conf is text either way, and airgradient.py coerces on read."""
+    SOURCE_SECTIONS = ['Proxy1', 'Proxy2', 'Proxy3', 'Proxy4',
+                       'Sensor1', 'Sensor2']
+
+    # A commented-out assignment: '#timeout = 1', never a prose comment,
+    # which always has a space after the '#'.
+    COMMENTED_OPTION_RE = re.compile(r'^(\s*)#(\w+)\s*=\s*(.+?)\s*$')
+    # Any comment line at all -- prose blocks included.
+    ANY_COMMENT_RE = re.compile(r'^(\s*)#')
+    SECTION_RE = re.compile(r'^\s*(\[+)([^\]]+)\]+\s*$')
+
+    @classmethod
+    def commented_options(cls):
+        """install.py's commented-out assignments, as {section: {option:
+        value}} -- 'AirGradient' for the ones at that level, the source
+        section's own name for the rest.  Read out of CONFIG as text because
+        a commented-out option is by definition absent from the parsed
+        object."""
+        found = {}
+        section = None
+        for line in cls.installer_module().CONFIG.splitlines():
+            header = cls.SECTION_RE.match(line)
+            if header:
+                section = header.group(2).strip()
+                continue
+            option = cls.COMMENTED_OPTION_RE.match(line)
+            if option:
+                found.setdefault(section, {})[option.group(2)] = option.group(3)
+        return found
+
+    def test_live_options_are_the_ones_with_no_default(self):
+        """What stays live is what the code cannot supply for itself: the
+        source on/off switches and the hostname placeholders the user has to
+        replace.  Everything with a real fallback is commented out, so it is
+        absent from the parsed stanza -- which is what lets the code's own
+        default govern.
+
+        The live keys are pinned as a COMPLETE SET, not by checking that
+        today's commented-out options are absent.  A named-absence check only
+        guards the options that already exist: a release that adds a new one
+        live -- `retries = 3` in the stanza against a `get('retries', 5)` in
+        the code -- would be the very drift this scheme exists to prevent,
+        and would sail past a test that only looks for port and timeout.
+        Adding a live key here has to be a deliberate act that edits this
+        test.
+
+        Values are compared through to_bool because a ConfigObj stanza yields
+        strings where a plain dict yields bools, and airgradient.py coerces
+        on read."""
         airgradient = self.installer_config()['AirGradient']
-        self.assertEqual(weeutil.weeutil.to_int(airgradient['poll_secs']), 15)
-        for name in ['Proxy1', 'Proxy2', 'Proxy3', 'Proxy4']:
+        # Every [AirGradient] scalar is commented out; only [[LoopFields]]
+        # and the source subsections remain.  .scalars is ConfigObj's list of
+        # a section's non-section keys, so this is the complete set, not a
+        # spot check.
+        self.assertEqual(airgradient.scalars, [])
+        for name in self.SOURCE_SECTIONS:
             source = airgradient[name]
-            self.assertFalse(weeutil.weeutil.to_bool(source['enable']), name)
-            # airgradient-proxy listens on 8080, not 8000.
-            self.assertEqual(weeutil.weeutil.to_int(source['port']), 8080, name)
-            # A proxy answers from its own database on the LAN; if it has not
-            # answered in a second it is down.  This also bounds the archive
-            # backfill, which runs on the main thread once per record.
-            self.assertEqual(weeutil.weeutil.to_int(source['timeout']), 1, name)
+            self.assertEqual(sorted(source.scalars), ['enable', 'hostname'],
+                             name)
+            # Sensor1 is on so that a fresh install works with no proxy.
+            self.assertEqual(weeutil.weeutil.to_bool(source['enable']),
+                             name == 'Sensor1', name)
         self.assertEqual(airgradient['Proxy1']['hostname'], 'proxy1')
-        self.assertTrue(weeutil.weeutil.to_bool(airgradient['Sensor1']['enable']))
-        self.assertFalse(weeutil.weeutil.to_bool(airgradient['Sensor2']['enable']))
-        for name in ['Sensor1', 'Sensor2']:
-            source = airgradient[name]
-            self.assertEqual(weeutil.weeutil.to_int(source['port']), 80, name)
-            self.assertEqual(weeutil.weeutil.to_int(source['timeout']), 15, name)
+        self.assertEqual(airgradient['Proxy2']['hostname'], 'proxy2')
+        self.assertEqual(airgradient['Proxy3']['hostname'], 'proxy3')
+        self.assertEqual(airgradient['Proxy4']['hostname'], 'proxy4')
         self.assertEqual(airgradient['Sensor1']['hostname'], 'airgradient')
         self.assertEqual(airgradient['Sensor2']['hostname'], 'airgradient2')
+
+    def test_placeholder_hostnames_are_marked_as_placeholders(self):
+        """Every hostname carries a PLACEHOLDER -- comment.  Three kinds of
+        line now share the stanza and the user has to tell them apart at a
+        glance: a commented-out assignment (the value the extension supplies,
+        uncomment only to pin it), a live setting that means what it says
+        (enable), and a live setting whose value is deliberately fake.  Only
+        the last kind breaks the extension if it is ignored, and it is the
+        one that looks most like a working setting -- 'hostname = proxy1' is
+        syntactically indistinguishable from a real answer.  The marker is
+        what the comment leads with rather than something buried at the end
+        of the prose."""
+        airgradient = self.installer_config()['AirGradient']
+        for name in self.SOURCE_SECTIONS:
+            # ConfigObj hands back the comment block attached to the key.
+            comment = ' '.join(airgradient[name].comments['hostname'])
+            self.assertIn('PLACEHOLDER', comment, name)
+
+    def test_commented_options_match_the_code_defaults(self):
+        """The drift guard.  A commented-out option shows the user the value
+        that will actually be used, so it must equal the fallback
+        airgradient.py applies when the key is absent -- and nothing but
+        airgradient.py governs it once the installer stops writing it live.
+
+        WHICH SIDE MOVES WHEN THIS FAILS IS A JUDGEMENT, NOT A FORMALITY.
+        Do not make it pass by editing the commented-out assignment to match
+        the code.  While the option was written live, the installer's value
+        is what every fresh install has actually been running and the code's
+        fallback was never reached, so editing the assignment down to the
+        fallback turns the test green while silently changing what new
+        stations get.  Moving the fallback to match the installer is usually
+        what preserves behavior; moving the assignment is a deliberate change
+        of default and belongs in changes.txt.  Existing stations are
+        unaffected either way -- their weewx.conf already carries the value
+        the installer wrote, and an upgrade never rewrites it.
+
+        This caught one instance here: the installer had shipped
+        timeout = 15 for monitors since the first release while Source fell
+        back to 10, so the code moved to 15."""
+        commented = self.commented_options()
+        for name in self.SOURCE_SECTIONS:
+            options = dict(commented[name])
+            source = Source({name: {}}, name, name.startswith('Proxy'))
+            self.assertEqual(weeutil.weeutil.to_int(options.pop('port')),
+                             source.port, name)
+            self.assertEqual(weeutil.weeutil.to_int(options.pop('timeout')),
+                             source.timeout, name)
+            # Anything else commented out here is a default nothing checks.
+            self.assertEqual(options, {}, name)
+
+        # poll_secs' fallback lives in AirGradient.__init__, so it takes a
+        # started-up service to read.  A config with no enabled source
+        # neither fetches, nor spawns the poller, nor registers the xtype,
+        # but still parses.
+        engine = mock.Mock()
+        engine.console.archive_interval = 300
+        options = dict(commented['AirGradient'])
+        with mock.patch('user.airgradient.get_reading'), \
+             mock.patch('user.airgradient.threading.Thread'):
+            ag = AirGradient(engine, {'AirGradient': {
+                'Sensor1': {'enable': False, 'hostname': 's'}}})
+        self.assertEqual(weeutil.weeutil.to_int(options.pop('poll_secs')),
+                         ag.cfg.poll_secs)
+        self.assertEqual(options, {})
+
+    def test_merged_stanza_keeps_comments_in_their_own_section(self):
+        """The placement rule, checked through the real merge.  ConfigObj
+        attaches a comment block to the NEXT key, so a commented-out option
+        that is last in its section attaches to the section that follows and
+        is written out at the PARENT's indentation, where it reads as an
+        option of the parent rather than of the block it documents.  Every
+        source section therefore ends with a live key (hostname).  This
+        merges the stanza the way weectl does -- weeutil.config's
+        conditional_merge, which transfers comments along with the keys it
+        creates.
+
+        PROSE blocks are covered by the survival count at the end, not by
+        the indentation check.  ConfigObj strips a comment's leading
+        whitespace when it reads it and re-applies indentation on write from
+        whatever key the block attached to, so how a prose line is indented
+        in CONFIG cannot reach the output -- an indentation assertion over
+        prose is one that can never fail.  What CAN go wrong to a prose
+        block is that it disappears, which is what the count catches."""
+        # A weewx.conf with no [AirGradient] yet.  Parsed from text rather
+        # than built empty: ConfigObj takes its indent_type from what it
+        # read, and a config that was never read indents nothing at all.
+        merged = configobj.ConfigObj(io.StringIO(
+            '[Station]\n    location = home\n'))
+        weeutil.config.conditional_merge(merged, self.installer_config())
+        out = io.BytesIO()
+        merged.write(out)
+        lines = out.getvalue().decode('utf-8').splitlines()
+
+        depth = 0
+        seen = 0
+        for line in lines:
+            header = self.SECTION_RE.match(line)
+            if header:
+                depth = len(header.group(1))
+                continue
+            option = self.COMMENTED_OPTION_RE.match(line)
+            if option:
+                # A commented-out assignment documents an option OF THE
+                # SECTION IT SITS IN, so it is measured against that
+                # section's scalar indentation -- 4 * depth, tracked from
+                # the headers -- and NOT against the key it turned out to
+                # attach to.  The latter would be tautological: a commented
+                # option left last in its section attaches to the NEXT
+                # section and is written at that section's own indentation,
+                # which is precisely the bug, and would measure as correct.
+                seen += 1
+                self.assertEqual(len(option.group(1)), 4 * depth,
+                                 'wrong indentation, so it merged outside '
+                                 'its section: %r' % line)
+        # port and timeout in each of the six source sections, plus poll_secs.
+        self.assertEqual(seen, 2 * len(self.SOURCE_SECTIONS) + 1)
+
+        # Every comment line in CONFIG survives the merge -- prose blocks
+        # included.  This is what catches a block that vanishes rather than
+        # one that moves: anything left last in the LAST section becomes the
+        # ConfigObj's final_comment, which conditional_merge does not
+        # transfer at all, and a dropped line leaves nothing for the
+        # indentation check above to look at.
+        source_comments = sum(
+            1 for line in self.installer_module().CONFIG.splitlines()
+            if self.ANY_COMMENT_RE.match(line))
+        merged_comments = sum(
+            1 for line in lines if self.ANY_COMMENT_RE.match(line))
+        self.assertEqual(merged_comments, source_comments)
 
     def test_stanza_carries_comments(self):
         """The point of building the stanza from a ConfigObj: weectl writes
         the comments into a fresh weewx.conf, so each option arrives with a
-        line saying what it does."""
+        line saying what it does -- and, for the options the extension
+        supplies itself, the commented-out assignment IS the documentation,
+        so it has to survive parsing as part of some key's comment block."""
         config = self.installer_config()
-        self.assertTrue(config['AirGradient'].comments['poll_secs'])
-        self.assertTrue(config['AirGradient']['Proxy1'].comments['timeout'])
+        airgradient = config['AirGradient']
+        # #poll_secs = 15 rides on the block attached to [[LoopFields]], the
+        # next key in the section.
+        self.assertIn('    #poll_secs = 15', airgradient.comments['LoopFields'])
+        self.assertIn('        #timeout = 1',
+                      airgradient['Proxy1'].comments['hostname'])
+        self.assertTrue(config['StdReport']['AirGradientReport'].comments['HTML_ROOT'])
 
     def test_version_matches_the_module(self):
         """The version lives in THREE places and they must not drift:

@@ -250,32 +250,52 @@ Pi OS; on other platforms it serves as a specification of the steps needed.
 
 ```
 [AirGradient]
-    poll_secs = 15
+    # How often to poll the sensor/proxy, in seconds.
+    #poll_secs = 15
     [[LoopFields]]
+        # The install creates this section EMPTY -- these are suggestions
+        # to paste in, not what you get.
         pm01 = pm1_0
         pm02Compensated = pm2_5
         pm10 = pm10_0
         rco2 = co2
+        # These four have no column in the wview_extended schema.  Mapped
+        # as they stand they are current values only -- no archive records,
+        # aggregates or graphs.  See "Adding TVOC/NOx columns".
         tvocIndex = tvocIndex
         tvocRaw = tvoc
         noxIndex = noxIndex
         noxRaw = nox
     [[Sensor1]]
         enable = true
+        # The port the monitor's own web server listens on
+        #port = 80
+        # http timeout (seconds)
+        #timeout = 15
+        # PLACEHOLDER -- replace with the host name or IP address of the
+        # first monitor
         hostname = airgradient
-        port = 80
-        timeout = 15
     [[Sensor2]]
         enable = false
+        #port = 80
+        #timeout = 15
         hostname = airgradient2
-        port = 80
-        timeout = 15
     [[Proxy1]]
         enable = false
+        #port = 8080
+        #timeout = 1
         hostname = proxy1
-        port = 8080
-        timeout = 1
 ```
+
+The options the install writes commented out are the ones weewx-airgradient
+supplies for itself.  Leave one commented and the extension's own value
+governs, including a better one a later release might bring; uncomment it to
+pin this station to the value shown.  `hostname` is written live because
+there is nothing to fall back on -- it is the one you have to replace with
+your own.  `enable` is written live for a different reason: `Sensor1` ships
+enabled so that a fresh install works with no proxy, and that is not what an
+absent `enable` means.  Leave `enable` out of a section and that source is
+simply off.
 
 | Option      | Default                    | Meaning                                       |
 |-------------|----------------------------|-----------------------------------------------|
@@ -284,7 +304,7 @@ Pi OS; on other platforms it serves as a specification of the steps needed.
 | `enable`    | false                      | Whether this source is polled                 |
 | `hostname`  |                            | Hostname or IP address of the monitor/proxy   |
 | `port`      | 80 (sensor) / 8080 (proxy) | Port to connect on                            |
-| `timeout`   | 1 (proxy) / 10 (sensor)    | HTTP timeout (seconds).  A proxy answers from its own database on the local network, so a second is ample; a monitor's own processor is slow, and the installer writes 15 for one. |
+| `timeout`   | 1 (proxy) / 15 (sensor)    | HTTP timeout (seconds).  A proxy answers from its own database on the local network, so a second is ample; a monitor's own processor is slow and easily overwhelmed, so it gets more room. |
 
 AirGradient monitors are specified with subsections `[[Sensor1]]`,
 `[[Sensor2]]`, etc.; airgradient-proxy services with `[[Proxy1]]`,
@@ -307,6 +327,25 @@ an error at startup to that effect.  The section is deliberately not
 prefilled by the installer: on upgrade, weectl merges installer defaults
 into your existing section, which would inject unwanted entries into a
 customized mapping.
+
+#### Adding TVOC/NOx columns to the database (optional)
+
+`pm1_0`, `pm2_5`, `pm10_0` and `co2` are already columns in the
+wview_extended schema, so mapping to them needs no database work.  `tvoc`,
+`tvocIndex`, `nox` and `noxIndex` are not.  Mapped without adding columns
+they are current values only — `$current.tvoc` works, but there are no
+archive records, no aggregates (`$day.nox.avg`) and no graphs, and nothing
+is logged to say so.  To get those, add the columns:
+
+```
+sudo systemctl stop weewx
+source /home/weewx/weewx-venv/bin/activate
+weectl database add-column tvoc --type=REAL
+weectl database add-column tvocIndex --type=REAL
+weectl database add-column nox --type=REAL
+weectl database add-column noxIndex --type=REAL
+sudo systemctl start weewx
+```
 
 Any field the monitor reports can be mapped.  The full list:
 
@@ -573,6 +612,9 @@ out of the mapping.
     enable_aqi = False
     [[LoopFields]]
         rco2 = co2
+        # These four have no column in the wview_extended schema.  Mapped
+        # as they stand they are current values only -- no archive records,
+        # aggregates or graphs.  See "Adding TVOC/NOx columns".
         tvocIndex = tvocIndex
         tvocRaw = tvoc
         noxIndex = noxIndex

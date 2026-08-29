@@ -137,8 +137,9 @@ class Source:
             self.timeout = to_int(source_dict.get('timeout', 1))
         else:
             self.port = to_int(source_dict.get('port', 80))
-            # A sensor's own processor is slow and easily overwhelmed.
-            self.timeout = to_int(source_dict.get('timeout', 10))
+            # A monitor's own processor is slow and easily overwhelmed, so
+            # give it more room than a proxy.
+            self.timeout = to_int(source_dict.get('timeout', 15))
 
 @dataclass
 class Reading:
@@ -1186,7 +1187,7 @@ if __name__ == "__main__":
 
     def test_collector(hostname, port):
         while True:
-            print(collect_data(hostname, port, 10))
+            print(collect_data(hostname, port, 15))
             time.sleep(5)
 
     def test_is_sane():
