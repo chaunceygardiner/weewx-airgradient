@@ -214,7 +214,20 @@ Pi OS; on other platforms it serves as a specification of the steps needed.
 
 1. Install the extension and restart WeeWX.
 
-   WeeWX 5:
+   WeeWX 5, pip install (`weectl` lives in the virtual environment, so
+   activate it first; yours may sit elsewhere, `~/weewx-venv` is the usual
+   place):
+
+   ```
+   source ~/weewx-venv/bin/activate
+   weectl extension install weewx-airgradient.zip
+   ```
+
+   WeeWX 5, Debian or Red Hat package install (`weectl` is already on the
+   path).  No `sudo`: that install put your account in the `weewx` group,
+   which owns the files -- if you installed WeeWX in this same login
+   session, log out and back in first so the group membership takes
+   effect.
 
    ```
    weectl extension install weewx-airgradient.zip
