@@ -3,6 +3,11 @@ weewx-airgradient change history
 
 4.0.1 (in development)
 ----------------------
+- When a fresh reading arrives after an outage, the log line saying so
+  now says how long readings were missing ("Fresh reading available
+  again after 13 min."), so an outage can be read whole from that one
+  line, even when the "Found no fresh reading to insert." line that
+  began it is in an earlier log.
 - The options weewx-airgradient has its own default for -- poll_secs, and
   each source's port and timeout -- are now written into weewx.conf
   COMMENTED OUT rather than live.  Existing installations are untouched: an

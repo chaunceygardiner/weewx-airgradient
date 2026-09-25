@@ -19,7 +19,8 @@ description: Log messages, the manual collector harness, and running the hermeti
   mapping — see [Configuration](configuration.md#the-loopfields-mapping).
 * `Found no fresh reading to insert.`: the monitor has stopped answering, or
   is answering with insane readings.  Logged once per outage; `Fresh reading
-  available again.` is logged on recovery.
+  available again after 13 min.` is logged on recovery, with how long the
+  outage lasted.
 * `airgradient reading from <host> not sane, ...`: the reason and the
   offending reading are included in the message.
 * `Backfilled ... into archive record <time>`: an archive period WeeWX was

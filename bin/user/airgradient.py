@@ -199,6 +199,13 @@ def datetime_from_reading(dt_str):
 def utc_now():
     return datetime.datetime.now(tz=tz.gettz("UTC"))
 
+def outage_length(since: float, now: float) -> str:
+    """How long readings were stale, as the line saying they are fresh
+    again gives it: whole minutes, which a log reader can take as
+    `after (\\d+) min` to tell a blip from an outage."""
+    return '%d min' % round((now - since) / 60)
+
+
 def reraise_if_terminate(e: BaseException) -> None:
     """weewxd stops by raising Terminate from its SIGTERM signal handler --
     inside whatever the main thread is executing at that instant.  Every
@@ -526,7 +533,8 @@ class AirGradient(StdService):
 
         self.engine = engine
         self.config_dict = config_dict.get('AirGradient', {})
-        self.stale_logged = False
+        # When the readings went stale, or None while they are fresh.
+        self.stale_since: Optional[float] = None
 
         # The interval WeeWX actually archives on, decided the way the engine
         # decides it: under SOFTWARE record generation weewx.conf's value is
@@ -625,9 +633,10 @@ class AirGradient(StdService):
             log.debug('new_loop_packet: self.cfg.reading: %s' % self.cfg.reading)
             if self.cfg.reading is not None and \
                     self.cfg.reading.measurementTime.timestamp() + self.cfg.fresh_secs >= time.time():
-                if self.stale_logged:
-                    log.info('Fresh reading available again.')
-                    self.stale_logged = False
+                if self.stale_since is not None:
+                    log.info('Fresh reading available again after %s.'
+                             % outage_length(self.stale_since, time.time()))
+                    self.stale_since = None
                 log.debug('Time of reading being inserted: %s' % timestamp_to_string(self.cfg.reading.measurementTime.timestamp()))
 
                 values = loop_values(self.cfg.reading, event.packet['usUnits'], self.cfg.loop_fields)
@@ -646,10 +655,11 @@ class AirGradient(StdService):
                         event.packet['pm2_5_aqi'] = AQI.compute_pm2_5_aqi(pm02)
                         event.packet['pm2_5_aqi_color'] = AQI.compute_pm2_5_aqi_color(event.packet['pm2_5_aqi'])
             else:
-                # Log at error level once per outage, not once per loop packet.
-                if not self.stale_logged:
+                # Log at error level once per outage, not once per loop
+                # packet; the line when it ends says how long it lasted.
+                if self.stale_since is None:
                     log.error('Found no fresh reading to insert.')
-                    self.stale_logged = True
+                    self.stale_since = time.time()
                 else:
                     log.debug('Found no fresh reading to insert.')
 

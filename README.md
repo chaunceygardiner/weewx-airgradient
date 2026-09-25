@@ -643,7 +643,8 @@ out of the mapping.
   the suggested mapping (see above).
 * `Found no fresh reading to insert.`: the monitor has stopped answering
   (or is answering with insane readings).  Logged once per outage;
-  `Fresh reading available again.` is logged on recovery.
+  `Fresh reading available again after 13 min.` is logged on recovery,
+  with how long the outage lasted.
 * `airgradient reading from <host> not sane, ...`: the reason and the
   offending reading are included in the message.
 * `Backfilled ... into archive record <time>`: an archive period WeeWX was

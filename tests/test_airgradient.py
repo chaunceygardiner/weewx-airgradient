@@ -610,7 +610,7 @@ class TestNewLoopPacket(unittest.TestCase):
         ag = AirGradient.__new__(AirGradient)
         ag.cfg = make_cfg(reading=reading, loop_fields=loop_fields,
                           enable_aqi=enable_aqi)
-        ag.stale_logged = False
+        ag.stale_since = None
         ag.archive_interval = 300
         ag.reading_times = []
         ag.reading_retention_secs = 600
@@ -705,17 +705,29 @@ class TestNewLoopPacket(unittest.TestCase):
         ag.new_loop_packet(event)
         self.assertEqual(event.packet, {'usUnits': weewx.US})
 
-    def test_stale_logged_once_per_outage(self):
-        ag = self.make_airgradient(make_reading(age_secs=121))
-        ag.new_loop_packet(self.make_event())
-        self.assertTrue(ag.stale_logged)
-        ag.new_loop_packet(self.make_event())
-        self.assertTrue(ag.stale_logged)
-        # Fresh data again: flag resets.
-        with ag.cfg.lock:
-            ag.cfg.reading = make_reading()
-        ag.new_loop_packet(self.make_event())
-        self.assertFalse(ag.stale_logged)
+    def test_an_outage_is_logged_once_each_way_with_its_length(self):
+        """ERROR when the readings go stale, nothing more while they stay
+        stale, INFO with how long it lasted when a fresh one arrives, so an
+        outage reads whole from the recovery line even when the ERROR line
+        is in an earlier log."""
+        clock = [1_000_000.0]
+
+        def at(ts):
+            return make_reading(measurementTime=datetime.datetime.fromtimestamp(
+                ts, tz=datetime.timezone.utc))
+        ag = self.make_airgradient(at(clock[0] - 121))
+        with mock.patch.object(user.airgradient.time, 'time', lambda: clock[0]), \
+                self.assertLogs('user.airgradient', level='INFO') as logs:
+            for _ in range(13):                 # stale a minute apart
+                ag.new_loop_packet(self.make_event())
+                clock[0] += 60
+            with ag.cfg.lock:
+                ag.cfg.reading = at(clock[0])
+            ag.new_loop_packet(self.make_event())
+        self.assertEqual(logs.output, [
+            'ERROR:user.airgradient:Found no fresh reading to insert.',
+            'INFO:user.airgradient:Fresh reading available again after 13 min.'])
+        self.assertIsNone(ag.stale_since)
 
 class TestAirGradientInit(unittest.TestCase):
     """Startup wiring: config parsing, xtype registration, poller launch.
@@ -1119,7 +1131,7 @@ class TestReadingTimeTally(unittest.TestCase):
     def make_airgradient(loop_fields=None, retention_secs=600):
         ag = AirGradient.__new__(AirGradient)
         ag.cfg = make_cfg(reading=None, loop_fields=loop_fields)
-        ag.stale_logged = False
+        ag.stale_since = None
         ag.archive_interval = 300
         ag.reading_times = []
         ag.reading_retention_secs = retention_secs
@@ -1482,7 +1494,7 @@ class TestNewArchiveRecord(unittest.TestCase):
             sources=sources if sources is not None
                     else [make_source('Proxy1', is_proxy=True, hostname='proxy1')],
             reading=None, loop_fields=loop_fields)
-        ag.stale_logged = False
+        ag.stale_since = None
         ag.archive_interval = archive_interval
         ag.reading_times = []
         ag.reading_retention_secs = 2 * archive_interval
@@ -1697,7 +1709,7 @@ class TestTwoMinuteStandIn(unittest.TestCase):
         ag = AirGradient.__new__(AirGradient)
         ag.cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True, hostname='proxy1')],
                           reading=None, loop_fields={'pm02Compensated': 'pm2_5'})
-        ag.stale_logged = False
+        ag.stale_since = None
         ag.archive_interval = 300
         ag.reading_times = []
         ag.reading_retention_secs = 600
