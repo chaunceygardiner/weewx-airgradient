@@ -1,8 +1,6 @@
-weewx-airgradient change history
---------------------------------
+# weewx-airgradient change history
 
-4.0.1 (in development)
-----------------------
+## 4.0.1 (in development)
 - When a fresh reading arrives after an outage, the log line saying so
   now says how long readings were missing ("Fresh reading available
   again after 13 min."), so an outage can be read whole from that one
@@ -35,8 +33,7 @@ weewx-airgradient change history
   you are told to reach for when a monitor is not answering could time out
   against a monitor the extension was polling successfully.
 
-4.0 08/28/2026
---------------
+## 4.0 08/28/2026
 - ACTION REQUIRED: this release requires WeeWX 4.6 or later (4.6 was
   released 02/04/2022; the whole 4.10 series and every WeeWX 5 qualify).
   The floor was 4, and both install.py and the extension now refuse to
@@ -60,11 +57,11 @@ weewx-airgradient change history
 - German, French, Dutch and Spanish ship with the skin
   (skins/airgradient/lang/de.conf, fr.conf, nl.conf and es.conf).  Select
   one per report in weewx.conf:
-
-      [StdReport]
-          [[AirGradientReport]]
-              lang = de                # or fr, nl, or es
-
+  ```
+  [StdReport]
+      [[AirGradientReport]]
+          lang = de                # or fr, nl, or es
+  ```
   [StdReport] [[Defaults]] lang = de instead switches every skin that
   ships German at once.  Each translation is complete and kept complete
   by a test, so a new string cannot ship untranslated, and the
@@ -73,7 +70,7 @@ weewx-airgradient change history
   https://github.com/chaunceygardiner/weewx-airgradient/issues.
 - To add a language, copy skins/airgradient/lang/en.conf -- the reference
   dictionary, which a test keeps to exactly the strings the page renders
-  -- translate the values, and point the report at it with lang = <code>.
+  -- translate the values, and point the report at it with `lang = <code>`.
   No code is involved.
 - Each language also localizes the year plot's date axis: day-month
   rather than the US month/day order, and lang/en.conf restates the US
@@ -84,7 +81,7 @@ weewx-airgradient change history
   locale-style setting such as lang = de_DE.UTF-8 -- which WeeWX 5.1 and
   later accept, and load lang/de.conf for -- yields lang="de" rather than
   an invalid one.
-- The PM2.5 plot is now labelled "PM2.5" ("PM2,5" in the decimal-comma
+- The PM2.5 plot is now labeled "PM2.5" ("PM2,5" in the decimal-comma
   languages) rather than "Concentration of Particles < 2.5 Micrometers",
   which no longer fit once the label had to work in five languages.
 - The manual has a new page, "Translating the demo page", covering all of
@@ -98,8 +95,7 @@ weewx-airgradient change history
   plain text links.  airgradient-proxy is no longer the second thing the
   page names; it keeps its own section and its Requires bullet.
 
-3.0 08/27/2026
---------------
+## 3.0 08/27/2026
 - ACTION REQUIRED for existing installations that poll an
   airgradient-proxy: change timeout to 1 in every [[ProxyN]] section of
   weewx.conf.  A proxy answers out of its own database on the local
@@ -139,7 +135,7 @@ weewx-airgradient change history
 - The demo skin now ships the OpenSans fonts (as WeeWX's Seasons skin
   does) and points [ImageGenerator] at them.  WeeWX's built-in bitmap
   font cannot draw the micro sign or the superscript three, so every
-  concentration plot has been labelling its y axis with two empty boxes
+  concentration plot has been labeling its y axis with two empty boxes
   instead of ug/m3.  Upgrading replaces the bundled skin, so the fix
   arrives with it.
 - The demo report screenshot in the README and the manual has been
@@ -157,8 +153,7 @@ weewx-airgradient change history
   archive-interval-secs to match WeeWX's archive interval.
 - Insane readings are now logged as warnings (were logged as info).
 
-2.0.1 07/19/2026
-----------------
+## 2.0.1 07/19/2026
 Action required: none for typical installs.  Only if you added a
 pm2_5_aqi/pm2_5_aqi_color column to your database schema, see below.
 
@@ -180,15 +175,16 @@ pm2_5_aqi/pm2_5_aqi_color column to your database schema, see below.
 - If you added an AQI column to your database schema (not suggested by
   this extension's README, but possible), the accumulator no longer fills
   it.  Add to weewx.conf:
-      [StdWXCalculate]
-          [[Calculations]]
-              pm2_5_aqi = prefer_hardware
-              pm2_5_aqi_color = prefer_hardware
+  ```
+  [StdWXCalculate]
+      [[Calculations]]
+          pm2_5_aqi = prefer_hardware
+          pm2_5_aqi_color = prefer_hardware
+  ```
   This computes the stored values through the AQI xtype -- correctly
   EPA-rounded, unlike the averaged values stored before this release.
 
-2.0 07/18/2026
---------------
+## 2.0 07/18/2026
 Action required: none for typical installs.  If a report used
 $span.pm2_5_aqi.sum, remove it (see below).
 
@@ -251,13 +247,11 @@ $span.pm2_5_aqi.sum, remove it (see below).
   silently inoperable ([[Sensor]] instead of [[Sensor1]], a misspelled
   pm02Compensated, and a starup_timeout option that does not exist).
 
-1.1 07/12/2026
---------------
+## 1.1 07/12/2026
 - WeeWX could fail to shut down if it received SIGTERM while the
   AirGradient extension was fetching its startup sensor reading (the
   fetch's error handling swallowed the shutdown request).  Shutdown now
   always passes through.
 
-1.0 10/30/2025
---------------
+## 1.0 10/30/2025
 Initial release of weewx-airgradient.
