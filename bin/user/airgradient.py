@@ -21,6 +21,7 @@ AirGradient's local API is documented here:
 https://github.com/airgradienthq/arduino/blob/master/docs/local-server.md
 """
 
+import dataclasses
 import datetime
 import json
 import logging
@@ -140,6 +141,11 @@ class Source:
             # A monitor's own processor is slow and easily overwhelmed, so
             # give it more room than a proxy.
             self.timeout = to_int(source_dict.get('timeout', 15))
+        # Set once this proxy has been logged as serving unfiltered CO2, so
+        # the line appears once per proxy per run.  Not locked: written only
+        # from get_reading, which never runs on two threads at once (see
+        # Co2Median).
+        self.unfiltered_co2_logged = False
 
 @dataclass
 class Reading:
@@ -180,6 +186,59 @@ class Reading:
 # AirGradient.backfill_values.
 TWO_MINUTE_AVERAGE_SECS: int = 120
 
+class Co2Median:
+    """The median of the last 3 CO2 readings from the monitors polled
+    directly ([[SensorN]]).  A monitor's CO2 now and then drops or jumps for
+    a single reading, and that one reading can set the day's low or high; the
+    median of three removes it whichever way it goes.  It costs about one
+    poll_secs of lag on a real change, and a real one-reading plume is
+    removed along with the faults.
+
+    Readings from an airgradient-proxy never come here: the proxy applies
+    the same rule itself (2.2 and later), where it sees each reading exactly
+    once.  Downstream of it this extension sees each proxy sample more than
+    once, and a failover would hand it the other proxy's copy of a sample.
+
+    One buffer, shared by every [[SensorN]]: a standby monitor is not polled
+    while the first one answers, so a buffer of its own would be empty at
+    every failover and CO2 would be withheld each time.
+
+    Not locked.  apply is called only from get_reading, which runs on the
+    main thread for the startup reading and on the poller thread afterwards,
+    and the startup call returns before the poller is started, so it is
+    never used from two threads at once."""
+
+    def __init__(self, fresh_secs: int, poll_secs: int):
+        # A reading too old to go into a loop packet is too old to vote --
+        # with half a poll of margin, because a reading is stamped when its
+        # fetch ENDS, not on a schedule.  From poll_secs 40 up fresh_secs is
+        # exactly 3 polls, so after a single failed poll the oldest of the
+        # three would sit on the limit plus every fetch's jitter, and always
+        # be dropped; the margin keeps it.  airgradient-proxy 2.2 uses the
+        # same formula.
+        self.age_limit_secs = fresh_secs + poll_secs / 2
+        # (measurementTime, rco2) of the readings that carried a CO2 value,
+        # in arrival order, oldest first.  Never sorted.
+        self.buf: List[Tuple[float, float]] = []
+
+    def apply(self, reading: Reading) -> Reading:
+        """A copy of reading whose rco2 is the median of the last 3, or
+        None -- withheld -- until there are 3.  Every other field is
+        untouched."""
+        v = reading.rco2
+        # Python's json accepts NaN, and one in buf would scramble the sort
+        # for as long as it stayed there.
+        if v is None or not math.isfinite(v):
+            return dataclasses.replace(reading, rco2=None)
+        t = reading.measurementTime.timestamp()
+        self.buf = [(entry_t, entry_v) for entry_t, entry_v in self.buf
+                    if t - entry_t <= self.age_limit_secs]
+        self.buf.append((t, v))
+        self.buf = self.buf[-3:]
+        if len(self.buf) < 3:
+            return dataclasses.replace(reading, rco2=None)
+        return dataclasses.replace(reading, rco2=sorted(entry_v for _, entry_v in self.buf)[1])
+
 @dataclass
 class Configuration:
     lock          : threading.Lock
@@ -187,8 +246,9 @@ class Configuration:
     poll_secs     : int               # Immutable
     fresh_secs    : int               # Immutable
     loop_fields   : Dict[str, str]    # Immutable
-    sources       : List[Source]      # Immutable
+    sources       : List[Source]      # Immutable but for Source.unfiltered_co2_logged
     enable_aqi    : bool              # Immutable
+    co2_median    : Co2Median         # Not locked; see Co2Median
 
 def datetime_from_reading(dt_str):
     # 2025-10-25T17:45:00.000Z
@@ -208,23 +268,40 @@ def outage_length(since: float, now: float) -> str:
 
 def reraise_if_terminate(e: BaseException) -> None:
     """weewxd stops by raising Terminate from its SIGTERM signal handler --
-    inside whatever the main thread is executing at that instant.  Every
-    broad exception handler on a main-thread path must call this first and
-    hand the exception back, or weewx cannot shut down.  weewxd runs as
-    __main__, so its Terminate class cannot be imported here and is
-    recognized by name."""
-    if type(e).__name__ == 'Terminate':
-        raise e
+    inside whatever the main thread is executing at that instant -- and
+    Terminate subclasses Exception, so a broad handler on a main-thread
+    path catches the shutdown as its own failure, logs it, and weewxd runs
+    on until systemd kills it.  This extension's main-thread exposure is
+    AirGradient.__init__'s startup reading and the archive backfill, which
+    runs at every archive record; every broad exception handler on those
+    paths must call this first and hand the exception back.  The class is
+    the running weewxd's own, not a name match: weewxd.py runs as a script
+    on these stations, so the class is __main__.Terminate; the console
+    script would import it as weewxd.Terminate; and an `import weewxd` here
+    would mint a third class that is neither."""
+    for name in ('__main__', 'weewxd'):
+        cls = getattr(sys.modules.get(name), 'Terminate', None)
+        if isinstance(cls, type) and issubclass(cls, BaseException) and isinstance(e, cls):
+            raise e
 
 def get_reading(cfg: Configuration):
     for source in cfg.sources:
         if source.enable:
-            reading = collect_data(source.hostname,
-                                  source.port,
-                                  source.timeout,
-                                  source.is_proxy)
+            reading, unfiltered_co2 = collect_data(source.hostname,
+                                                   source.port,
+                                                   source.timeout,
+                                                   source.is_proxy)
             if reading is not None:
                 log.debug('get_reading: source: %s' % reading)
+                # airgradient-proxy 2.2 and later send rco2Unfiltered beside
+                # every rco2, so a proxy that sends rco2 alone is older and
+                # does not filter it.  Its CO2 is passed through as it is: a
+                # median applied this far downstream of a proxy would see
+                # each of its samples more than once.
+                if source.is_proxy and unfiltered_co2 and not source.unfiltered_co2_logged:
+                    log.info('airgradient-proxy at %s:%d serves unfiltered CO2; upgrade it to 2.2 or later.' % (
+                        source.hostname, source.port))
+                    source.unfiltered_co2_logged = True
                 age_of_reading = time.time() - reading.measurementTime.timestamp()
                 # Ignore old readings.  We can't accept a reading of age
                 # fresh_secs (or close to it) because the reading will age
@@ -234,6 +311,8 @@ def get_reading(cfg: Configuration):
                     log.info('Ignoring reading from %s:%d--age: %d seconds.' % (
                         source.hostname, source.port, age_of_reading))
                     continue
+                if not source.is_proxy:
+                    reading = cfg.co2_median.apply(reading)
                 log.debug('get_reading: reading: %s' % reading)
                 return reading
     log.error('Could not get reading from any source.')
@@ -285,15 +364,32 @@ def is_sane(j: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     return True, None
 
 def opt_float(j: Dict[str, Any], name: str) -> Optional[float]:
-    """A field that is absent or JSON null yields None."""
-    return float(j[name]) if j.get(name) is not None else None
+    """A field that is absent, JSON null, or not finite yields None.
+    Python's json accepts NaN and Infinity and is_sane passes them as
+    floats, but no reading means either: a NaN pm2_5 reaching a loop packet
+    made the AQI calculation raise on weewxd's main thread, which stopped
+    weewxd."""
+    if j.get(name) is None:
+        return None
+    value = float(j[name])
+    return value if math.isfinite(value) else None
 
-def parse_response(hostname: str, response: requests.Response) -> Optional[Reading]:
+def parse_response(hostname: str, response: requests.Response) -> Tuple[Optional[Reading], bool]:
+    """The reading, and whether the json carried rco2 without
+    rco2Unfiltered -- which, from an airgradient-proxy, means one older than
+    2.2 that does not filter CO2.  Checked here, where the live response's
+    json is still in hand, and never in reading_from_json: the backfill
+    parses a proxy's archive records through that, and a 2.2 proxy's records
+    from before its upgrade rightly have no rco2Unfiltered."""
     try:
         # convert to json
         j: Dict[str, Any] = response.json()
-        return reading_from_json(hostname, j)
+        reading = reading_from_json(hostname, j)
+        unfiltered_co2 = (reading is not None and j.get('rco2') is not None
+                          and j.get('rco2Unfiltered') is None)
+        return reading, unfiltered_co2
     except Exception as e:
+        reraise_if_terminate(e)
         log.info('parse_response: %r raised exception %r' % (response.text, e))
         raise e
 
@@ -349,9 +445,12 @@ def reading_from_json(hostname: str, j: Dict[str, Any]) -> Optional[Reading]:
         firmware        = j.get('firmware'),
         model           = j.get('model'))
 
-def collect_data(hostname, port, timeout, proxy = False) -> Optional[Reading]:
+def collect_data(hostname, port, timeout, proxy = False) -> Tuple[Optional[Reading], bool]:
+    """The reading, and whether it carried CO2 unfiltered -- see
+    parse_response."""
 
     reading: Optional[Reading] = None
+    unfiltered_co2 = False
     url = 'http://%s:%s/measures/current' % (hostname, port)
 
     try:
@@ -361,13 +460,14 @@ def collect_data(hostname, port, timeout, proxy = False) -> Optional[Reading]:
         r.raise_for_status()
         log.debug('collect_data: %s returned %r' % (hostname, r))
         if r:
-            reading = parse_response(hostname, r)
+            reading, unfiltered_co2 = parse_response(hostname, r)
     except Exception as e:
         reraise_if_terminate(e)
         log.info('collect_data: Attempt to fetch from: %s failed: %s.' % (hostname, e))
         reading = None
+        unfiltered_co2 = False
 
-    return reading
+    return reading, unfiltered_co2
 
 def loop_values(reading: Reading, us_units: int, loop_fields: Dict[str, str]) -> Dict[str, Any]:
     """The fields this extension contributes for one reading, keyed by the
@@ -584,7 +684,8 @@ class AirGradient(StdService):
             fresh_secs    = fresh_secs,
             loop_fields   = AirGradient.configure_loop_fields(self.config_dict),
             sources       = AirGradient.configure_sources(self.config_dict),
-            enable_aqi    = enable_aqi)
+            enable_aqi    = enable_aqi,
+            co2_median    = Co2Median(fresh_secs, poll_secs))
 
         log.info('poll_secs : %d' % self.cfg.poll_secs)
         log.info('fresh_secs: %d' % self.cfg.fresh_secs)
@@ -864,6 +965,14 @@ class DevicePoller:
     def poll_device(self) -> None:
         log.debug('poll_device: start')
         while True:
+            # Sleep BEFORE polling.  AirGradient.__init__ has just taken the
+            # startup reading, and a poll a fraction of a second later would
+            # fetch the same sample (the monitor updates CO2 every 4 seconds),
+            # which would then count twice among the 3 readings Co2Median
+            # takes the median of.  The startup reading is already in
+            # cfg.reading, so nothing is lost by waiting.
+            log.debug('poll_device: Sleeping for %d seconds.' % self.cfg.poll_secs)
+            time.sleep(self.cfg.poll_secs)
             try:
                 log.debug('poll_device: calling get_reading.')
                 reading = get_reading(self.cfg)
@@ -875,8 +984,6 @@ class DevicePoller:
             if reading is not None:
                 with self.cfg.lock:
                     self.cfg.reading = reading
-            log.debug('poll_device: Sleeping for %d seconds.' % self.cfg.poll_secs)
-            time.sleep(self.cfg.poll_secs)
 
 class AQI(weewx.xtypes.XType):
     """
@@ -1197,7 +1304,8 @@ if __name__ == "__main__":
 
     def test_collector(hostname, port):
         while True:
-            print(collect_data(hostname, port, 15))
+            reading, _ = collect_data(hostname, port, 15)
+            print(reading)
             time.sleep(5)
 
     def test_is_sane():

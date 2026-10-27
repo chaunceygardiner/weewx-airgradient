@@ -5,14 +5,18 @@
 the fetch stack down is exercised with mocks, and the xtype SQL paths run
 against an in-memory SQLite database."""
 
+import contextlib
+import dataclasses
 import datetime
 import importlib
 import importlib.util
 import io
+import json
 import logging
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import types
@@ -33,16 +37,43 @@ import weewx.xtypes
 
 import user.airgradient
 
-from user.airgradient import AQI, AirGradient, Configuration, Reading, Source
+from user.airgradient import AQI, AirGradient, Co2Median, Configuration, Reading, Source
 
 log = logging.getLogger(__name__)
 
 # Set up logging using the defaults.
 weeutil.logger.setup('test_config', {})
 
-# A class whose *name* matches weewxd's shutdown exception.  weewxd raises
-# Terminate from its SIGTERM handler; airgradient.py recognizes it by name.
-Terminate = type('Terminate', (Exception,), {})
+class Terminate(Exception):
+    """Stands in for weewxd's shutdown exception: installed as the running
+    weewxd's class for a test's duration by weewxd_running.  The extension
+    recognizes the running weewxd's own class, not the name."""
+
+class Impostor(Exception):
+    """Another module's class that happens to be called Terminate."""
+
+Impostor.__name__ = 'Terminate'
+
+@contextlib.contextmanager
+def weewxd_running(where='weewxd'):
+    """A weewxd whose Terminate is this file's, in sys.modules under
+    `where`: 'weewxd' as the console script has it, '__main__' as the
+    script launch (the fleet's) has it."""
+    if where == '__main__':
+        with mock.patch.object(sys.modules['__main__'], 'Terminate', Terminate, create=True):
+            yield
+        return
+    if 'weewxd' in sys.modules:           # the real one, imported by something
+        with mock.patch.object(sys.modules['weewxd'], 'Terminate', Terminate, create=True):
+            yield
+        return
+    module = types.ModuleType('weewxd')
+    module.Terminate = Terminate          # type: ignore[attr-defined]
+    sys.modules['weewxd'] = module
+    try:
+        yield
+    finally:
+        del sys.modules['weewxd']
 
 # As reported by an AirGradient ONE (I-9PSL) queried directly.
 VALID_PKT: Dict[str, Any] = {
@@ -81,6 +112,19 @@ def proxy_pkt(measurement_time='2027-10-27T18:58:17.000Z') -> Dict[str, Any]:
     measurementTime."""
     pkt = VALID_PKT.copy()
     pkt['measurementTime'] = measurement_time
+    return pkt
+
+# A reading carrying NaN and the two infinities, which Python's json accepts,
+# in a particulate, a temperature and CO2 -- every kind of number field.
+NON_FINITE_TEXT = json.dumps(VALID_PKT).replace(
+    '"pm02Compensated": 1.03', '"pm02Compensated": NaN').replace(
+    '"pm02": 0.67', '"pm02": Infinity').replace(
+    '"atmp": 21.91', '"atmp": -Infinity').replace(
+    '"rco2": 514', '"rco2": NaN')
+
+def non_finite_pkt(**extra) -> Dict[str, Any]:
+    pkt = json.loads(NON_FINITE_TEXT)
+    pkt.update(extra)
     return pkt
 
 # The mapping the README recommends for [LoopFields].
@@ -163,7 +207,8 @@ def make_cfg(sources=None, poll_secs=15, fresh_secs=120, reading=None,
         fresh_secs  = fresh_secs,
         loop_fields = loop_fields if loop_fields is not None else dict(LOOP_FIELDS),
         sources     = sources if sources is not None else [],
-        enable_aqi  = enable_aqi)
+        enable_aqi  = enable_aqi,
+        co2_median  = Co2Median(fresh_secs, poll_secs))
 
 def make_source(name='Sensor1', is_proxy=False, enable=True, hostname='host', **kwargs):
     d = {'enable': enable, 'hostname': hostname}
@@ -370,7 +415,7 @@ class TestParseResponse(unittest.TestCase):
         # stamped with the current UTC time.
         now = datetime.datetime(2027, 10, 27, 18, 58, 17, tzinfo=datetime.timezone.utc)
         with mock.patch('user.airgradient.utc_now', return_value=now):
-            reading = user.airgradient.parse_response('sensor', FakeResponse(VALID_PKT.copy()))
+            reading, _ = user.airgradient.parse_response('sensor', FakeResponse(VALID_PKT.copy()))
         self.assertIsNotNone(reading)
         self.assertEqual(reading.measurementTime, now)
         self.assertEqual(reading.serialno, 'd83bda1b9464')
@@ -382,20 +427,20 @@ class TestParseResponse(unittest.TestCase):
         self.assertEqual(reading.model, 'I-9PSL')
 
     def test_proxy_packet_keeps_measurement_time(self):
-        reading = user.airgradient.parse_response('proxy', FakeResponse(proxy_pkt()))
+        reading, _ = user.airgradient.parse_response('proxy', FakeResponse(proxy_pkt()))
         self.assertEqual(
             reading.measurementTime.timestamp(),
             datetime.datetime(2027, 10, 27, 18, 58, 17,
                               tzinfo=datetime.timezone.utc).timestamp())
 
     def test_whole_number_fields_become_floats(self):
-        reading = user.airgradient.parse_response('sensor', FakeResponse(VALID_PKT.copy()))
+        reading, _ = user.airgradient.parse_response('sensor', FakeResponse(VALID_PKT.copy()))
         self.assertIsInstance(reading.rco2, float)
         self.assertIsInstance(reading.wifi, float)
 
     def test_missing_optional_fields_are_none(self):
         pkt = {'serialno': 'abc', 'pm02': 3.0}
-        reading = user.airgradient.parse_response('sensor', FakeResponse(pkt))
+        reading, _ = user.airgradient.parse_response('sensor', FakeResponse(pkt))
         self.assertEqual(reading.pm02, 3.0)
         self.assertIsNone(reading.pm01)
         self.assertIsNone(reading.rco2)
@@ -406,7 +451,7 @@ class TestParseResponse(unittest.TestCase):
         pkt = VALID_PKT.copy()
         pkt['rco2'] = None
         pkt['boot'] = None
-        reading = user.airgradient.parse_response('sensor', FakeResponse(pkt))
+        reading, _ = user.airgradient.parse_response('sensor', FakeResponse(pkt))
         self.assertIsNotNone(reading)
         self.assertIsNone(reading.rco2)
         self.assertIsNone(reading.boot)
@@ -415,7 +460,17 @@ class TestParseResponse(unittest.TestCase):
         pkt = VALID_PKT.copy()
         pkt['pm02'] = 'nan'
         self.assertIsNone(
-            user.airgradient.parse_response('sensor', FakeResponse(pkt)))
+            user.airgradient.parse_response('sensor', FakeResponse(pkt))[0])
+
+    def test_non_finite_numbers_are_missing(self):
+        """NaN and Infinity pass is_sane as floats; parsing treats them as
+        missing, and the rest of the reading stands."""
+        pkt = non_finite_pkt()
+        self.assertTrue(user.airgradient.is_sane(pkt)[0])
+        reading, _ = user.airgradient.parse_response('sensor', FakeResponse(pkt))
+        for field in ['pm02Compensated', 'pm02', 'atmp', 'rco2']:
+            self.assertIsNone(getattr(reading, field), field)
+        self.assertEqual(reading.pm01, 0.67)
 
     def test_missing_serialno_raises(self):
         pkt = VALID_PKT.copy()
@@ -428,7 +483,7 @@ class TestCollectData(unittest.TestCase):
     def test_successful_fetch(self):
         with mock.patch('user.airgradient.requests.get',
                         return_value=FakeResponse(proxy_pkt())) as m:
-            reading = user.airgradient.collect_data('proxy.example', 8080, 10, True)
+            reading, _ = user.airgradient.collect_data('proxy.example', 8080, 10, True)
         m.assert_called_once()
         self.assertIsNotNone(reading)
         self.assertEqual(reading.serialno, 'd83bda1b9464')
@@ -440,7 +495,7 @@ class TestCollectData(unittest.TestCase):
         pkt = VALID_PKT.copy()
         pkt['pm02'] = 'nan'
         with mock.patch('user.airgradient.requests.get', return_value=FakeResponse(pkt)):
-            self.assertIsNone(user.airgradient.collect_data('sensor.example', 80, 10))
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
     def test_unparseable_reading_returns_none(self):
         # A packet without serialno makes parse_response raise; collect_data
@@ -448,45 +503,100 @@ class TestCollectData(unittest.TestCase):
         pkt = VALID_PKT.copy()
         del pkt['serialno']
         with mock.patch('user.airgradient.requests.get', return_value=FakeResponse(pkt)):
-            self.assertIsNone(user.airgradient.collect_data('sensor.example', 80, 10))
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
     def test_connection_error_returns_none(self):
         import requests
         with mock.patch('user.airgradient.requests.get',
                         side_effect=requests.exceptions.ConnectionError('no route')):
-            self.assertIsNone(user.airgradient.collect_data('sensor.example', 80, 10))
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
     def test_http_error_returns_none(self):
         import requests
         resp = FakeResponse(None, status_error=requests.exceptions.HTTPError('500'))
         with mock.patch('user.airgradient.requests.get', return_value=resp):
-            self.assertIsNone(user.airgradient.collect_data('sensor.example', 80, 10))
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
 class TestTerminatePassThrough(unittest.TestCase):
     """weewxd stops by raising Terminate from its SIGTERM handler inside
     whatever the main thread is executing.  The broad exception handlers on
-    main-thread paths must hand it back."""
+    main-thread paths must hand it back.  The guard recognizes the running
+    weewxd's own class, so these tests install a stand-in with
+    weewxd_running; one checks the real weewxd's class is seen."""
 
-    def test_reraise_if_terminate(self):
-        with self.assertRaises(Terminate):
+    def test_the_shutdown_is_the_running_weewxds_terminate(self):
+        """The guard asks the running weewxd for its class -- __main__ when
+        weewxd.py runs as a script (the fleet), weewxd under the console
+        script -- rather than matching the name."""
+        reraise = user.airgradient.reraise_if_terminate
+        reraise(Terminate())                    # no weewxd running: not the shutdown
+        for where in ('__main__', 'weewxd'):
+            with self.subTest(where=where):
+                with weewxd_running(where):
+                    with self.assertRaises(Terminate):
+                        reraise(Terminate())
+                    with self.assertRaises(Terminate):
+                        reraise(type('Subclass', (Terminate,), {})())
+                    reraise(Impostor())         # the name alone is not it
+                    reraise(ValueError('Terminate'))
+                reraise(Terminate())            # and gone with the module
+
+    def test_the_installed_weewxds_terminate_is_recognized(self):
+        """Against the real thing, not the stand-in: the venv's weewxd
+        defines the class weewxd's main loop catches.  A WeeWX release that
+        moved or renamed it would otherwise disarm the guard with every other
+        test green.  Removed from sys.modules again afterwards, so no later
+        test sees the real class where it expects the stand-in."""
+        fresh = 'weewxd' not in sys.modules
+        try:
+            import weewxd
+            self.assertTrue(issubclass(weewxd.Terminate, Exception))
+            with self.assertRaises(weewxd.Terminate):
+                user.airgradient.reraise_if_terminate(weewxd.Terminate())
+            # The stand-in is not it while the real one is installed.
             user.airgradient.reraise_if_terminate(Terminate())
-        # Any other exception is not re-raised.
-        self.assertIsNone(user.airgradient.reraise_if_terminate(ValueError()))
+        finally:
+            if fresh:
+                sys.modules.pop('weewxd', None)
+
+    def test_the_guard_only_trusts_a_class(self):
+        """A module whose Terminate is not an exception class is skipped
+        rather than tripped over."""
+        with mock.patch.dict(sys.modules, {'weewxd': types.SimpleNamespace(Terminate='x')}), \
+                mock.patch.object(sys.modules['__main__'], 'Terminate', int, create=True):
+            user.airgradient.reraise_if_terminate(Terminate())
+
+    def test_collect_data_treats_a_namesake_as_a_failure(self):
+        """A library exception that happens to be called Terminate is not
+        the shutdown: it is logged away like any other failure."""
+        with weewxd_running(), \
+                mock.patch('user.airgradient.requests.get', side_effect=Impostor('not weewxd')):
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
     def test_collect_data_passes_terminate_through(self):
         with mock.patch('user.airgradient.requests.get', side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 user.airgradient.collect_data('sensor.example', 80, 10)
+
+    def test_parse_response_passes_terminate_through_without_logging_it(self):
+        """parse_response logs a failure and re-raises it; the shutdown it
+        hands straight back, without logging it as a parse failure."""
+        class Stopping(FakeResponse):
+            def json(self):
+                raise Terminate()
+        with weewxd_running(), self.assertNoLogs('user.airgradient', level='INFO'), \
+                self.assertRaises(Terminate):
+            user.airgradient.parse_response('sensor.example', Stopping(None))
 
     def test_collect_data_swallows_other_exceptions(self):
         with mock.patch('user.airgradient.requests.get', side_effect=RuntimeError('boom')):
-            self.assertIsNone(user.airgradient.collect_data('sensor.example', 80, 10))
+            self.assertEqual(user.airgradient.collect_data('sensor.example', 80, 10), (None, False))
 
     def test_check_type_passes_terminate_through(self):
         class Exploder:
             def get(self, key):
                 raise Terminate()
-        with self.assertRaises(Terminate):
+        with weewxd_running(), self.assertRaises(Terminate):
             user.airgradient.check_type(Exploder(), [int], ['x'])
 
 class TestConfigureSources(unittest.TestCase):
@@ -549,8 +659,11 @@ class TestGetReading(unittest.TestCase):
     def test_single_source(self):
         cfg = make_cfg(sources=[make_source()])
         reading = make_reading()
-        with mock.patch('user.airgradient.collect_data', return_value=reading) as m:
-            self.assertIs(user.airgradient.get_reading(cfg), reading)
+        with mock.patch('user.airgradient.collect_data', return_value=(reading, False)) as m:
+            # A direct sensor's first reading: everything but its CO2, which
+            # is withheld until Co2Median holds 3 readings.
+            self.assertEqual(user.airgradient.get_reading(cfg),
+                             dataclasses.replace(reading, rco2=None))
         m.assert_called_once_with('host', 80, 15, False)
 
     def test_disabled_source_skipped(self):
@@ -558,7 +671,7 @@ class TestGetReading(unittest.TestCase):
         s2 = make_source('Sensor2', hostname='s2')
         cfg = make_cfg(sources=[s1, s2])
         with mock.patch('user.airgradient.collect_data',
-                        return_value=make_reading()) as m:
+                        return_value=(make_reading(), False)) as m:
             self.assertIsNotNone(user.airgradient.get_reading(cfg))
         m.assert_called_once()
         self.assertEqual(m.call_args[0][0], 's2')
@@ -568,7 +681,7 @@ class TestGetReading(unittest.TestCase):
         s2 = make_source('Sensor2', hostname='s2')
         cfg = make_cfg(sources=[s1, s2])
         with mock.patch('user.airgradient.collect_data',
-                        side_effect=[None, make_reading()]) as m:
+                        side_effect=[(None, False), (make_reading(), False)]) as m:
             self.assertIsNotNone(user.airgradient.get_reading(cfg))
         self.assertEqual(m.call_count, 2)
 
@@ -578,8 +691,8 @@ class TestGetReading(unittest.TestCase):
         s2 = make_source('Sensor2', hostname='s2')
         cfg = make_cfg(sources=[s1, s2])
         with mock.patch('user.airgradient.collect_data',
-                        side_effect=[make_reading(age_secs=101),
-                                     make_reading(age_secs=10)]) as m:
+                        side_effect=[(make_reading(age_secs=101), False),
+                                     (make_reading(age_secs=10), False)]) as m:
             reading = user.airgradient.get_reading(cfg)
         self.assertEqual(m.call_count, 2)
         self.assertIsNotNone(reading)
@@ -587,19 +700,446 @@ class TestGetReading(unittest.TestCase):
     def test_reading_within_cutoff_accepted(self):
         cfg = make_cfg(sources=[make_source()])
         with mock.patch('user.airgradient.collect_data',
-                        return_value=make_reading(age_secs=99)):
+                        return_value=(make_reading(age_secs=99), False)):
             self.assertIsNotNone(user.airgradient.get_reading(cfg))
 
     def test_stale_reading_ignored(self):
         cfg = make_cfg(sources=[make_source()])
         with mock.patch('user.airgradient.collect_data',
-                        return_value=make_reading(age_secs=101)):
+                        return_value=(make_reading(age_secs=101), False)):
             self.assertIsNone(user.airgradient.get_reading(cfg))
 
     def test_no_sources_respond(self):
         cfg = make_cfg(sources=[make_source()])
-        with mock.patch('user.airgradient.collect_data', return_value=None):
+        with mock.patch('user.airgradient.collect_data', return_value=(None, False)):
             self.assertIsNone(user.airgradient.get_reading(cfg))
+
+# The poll spacing the CO2 median tests use: poll_secs plus fetch time, never
+# an exact multiple of poll_secs.
+POLL = 15.1
+T0 = 1_800_000_000.0
+
+def co2_at(t, rco2, **overrides) -> Reading:
+    """A direct-sensor reading stamped T0 + t, carrying rco2."""
+    return make_reading(
+        measurementTime=datetime.datetime.fromtimestamp(T0 + t, tz=datetime.timezone.utc),
+        rco2=rco2, **overrides)
+
+def run_median(median: Co2Median, values, spacing=POLL):
+    """Feed one reading per value, spacing seconds apart, through
+    median.apply; the CO2 each one comes out with."""
+    return [median.apply(co2_at(i * spacing, v)).rco2 for i, v in enumerate(values)]
+
+class TestCo2Median(unittest.TestCase):
+    """The CO2 of a directly polled monitor is the median of its last 3
+    readings, withheld until there are 3.  Every timeline of the design runs
+    here, readings about 15.1 s apart."""
+
+    def test_the_median_of_the_last_three(self):
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 520, 510, 530, 490, 495]),
+                         [None, None, 510, 520, 510, 495])
+
+    def test_co2_withheld_until_three_readings(self):
+        """Timeline D, startup: nothing raw ever goes out -- not the first
+        reading, not the mean of the first two."""
+        median = Co2Median(120, 15)
+        self.assertIsNone(median.apply(co2_at(0, 500)).rco2)
+        self.assertIsNone(median.apply(co2_at(POLL, 520)).rco2)
+        self.assertEqual(median.apply(co2_at(2 * POLL, 510)).rco2, 510)
+
+    def test_every_other_field_is_untouched(self):
+        median = Co2Median(120, 15)
+        for i, v in enumerate([500, 400, 520]):
+            reading = co2_at(i * POLL, v)
+            out = median.apply(reading)
+            self.assertEqual(out, dataclasses.replace(reading, rco2=out.rco2))
+            # A copy: the reading handed in keeps its own CO2.
+            self.assertEqual(reading.rco2, v)
+        self.assertEqual(out.rco2, 500)
+
+    def test_a_one_poll_spike_never_reaches_a_packet(self):
+        """Timeline A, both directions: a, b, S, c, d."""
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 502, 433, 501, 503]),
+                         [None, None, 500, 501, 501])
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 502, 800, 501, 503]),
+                         [None, None, 502, 502, 503])
+
+    def test_a_step_change_arrives_one_poll_late(self):
+        """Timeline B: 520 -> 440."""
+        self.assertEqual(run_median(Co2Median(120, 15), [520, 520, 520, 440, 440, 440]),
+                         [None, None, 520, 520, 440, 440])
+
+    def test_a_steady_change_lags_one_poll(self):
+        """Timeline C: each value one poll late."""
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 490, 480, 470, 460]),
+                         [None, None, 490, 480, 470])
+        self.assertEqual(run_median(Co2Median(120, 15), [400, 410, 420, 430]),
+                         [None, None, 410, 420])
+
+    def test_a_short_outage_keeps_the_votes(self):
+        """Timeline E: after an outage shorter than fresh_secs less one poll
+        (the next test), the readings from before it still vote with the
+        first ones after it."""
+        median = Co2Median(120, 15)
+        run_median(median, [500, 510, 505])
+        # 100 s of failed polls, then a reading: 505 and 510 are inside
+        # fresh_secs, 500 (at 0) is not.
+        self.assertEqual(median.apply(co2_at(2 * POLL + 100, 600)).rco2, 510)
+
+    def test_the_outage_that_costs_co2(self):
+        """The first reading after an outage keeps its CO2 only while the
+        reading TWO back is still within the age limit of it (127.5 s here),
+        and that one is a poll older than the last reading before the
+        outage.  So CO2 goes missing after an outage of the age limit less
+        one poll: 127.5 - 15.1 = 112.4 s."""
+        median = Co2Median(120, 15)
+        run_median(median, [500, 510, 505])
+        self.assertEqual(median.apply(co2_at(2 * POLL + 112.3, 600)).rco2, 510)
+        median = Co2Median(120, 15)
+        run_median(median, [500, 510, 505])
+        self.assertIsNone(median.apply(co2_at(2 * POLL + 112.5, 600)).rco2)
+
+    def test_an_outage_longer_than_fresh_secs_empties_the_buffer(self):
+        """Timeline F: every entry ages out, and CO2 is withheld again until
+        three new readings arrive."""
+        median = Co2Median(120, 15)
+        self.assertEqual(run_median(median, [500, 510, 505])[-1], 505)
+        resume = 2 * POLL + 128
+        self.assertIsNone(median.apply(co2_at(resume, 600)).rco2)
+        self.assertIsNone(median.apply(co2_at(resume + POLL, 610)).rco2)
+        self.assertEqual(median.apply(co2_at(resume + 2 * POLL, 605)).rco2, 605)
+
+    def test_the_age_limit_is_fresh_secs_plus_half_a_poll(self):
+        # An entry exactly 127.5 s old (fresh_secs 120 plus half of a 15 s
+        # poll) still votes; one a tenth of a second older does not.
+        median = Co2Median(120, 15)
+        median.apply(co2_at(0, 500))
+        median.apply(co2_at(0.1, 510))
+        self.assertEqual(median.apply(co2_at(127.5, 505)).rco2, 505)
+        median = Co2Median(120, 15)
+        median.apply(co2_at(0, 500))
+        median.apply(co2_at(0.1, 510))
+        self.assertIsNone(median.apply(co2_at(127.6, 505)).rco2)
+
+    def test_poll_secs_60(self):
+        """Timeline I: poll_secs 60 gives fresh_secs 180, and the entries at
+        t, t - 60 and t - 120 all vote."""
+        self.assertEqual(run_median(Co2Median(180, 60), [500, 520, 510, 530], spacing=60.1),
+                         [None, None, 510, 520])
+
+    def test_poll_secs_60_survives_one_failed_poll(self):
+        """From poll_secs 40 up, fresh_secs is exactly 3 polls, and every
+        reading is stamped when its fetch ends, a little late.  After one
+        failed poll -- which also costs the monitor's 15 s timeout -- the
+        oldest vote is past fresh_secs; the half poll of margin keeps it.  A
+        second failed poll is an outage, and CO2 is withheld."""
+        median = Co2Median(180, 60)
+        run_median(median, [500, 520], spacing=60.4)
+        one_missed = 60.4 + 2 * 60.4 + 15
+        self.assertGreater(one_missed, 180)
+        self.assertEqual(median.apply(co2_at(one_missed, 510)).rco2, 510)
+        median = Co2Median(180, 60)
+        run_median(median, [500, 520], spacing=60.4)
+        self.assertIsNone(median.apply(co2_at(60.4 + 3 * 60.4 + 30, 510)).rco2)
+
+    def test_no_co2_is_no_co2(self):
+        """Timeline J: a monitor that reports no CO2."""
+        median = Co2Median(120, 15)
+        self.assertEqual(run_median(median, [None, None, None, None]),
+                         [None, None, None, None])
+        self.assertEqual(median.buf, [])
+
+    def test_nan_and_infinity_are_treated_as_missing(self):
+        # Python's json accepts NaN and Infinity, and is_sane passes them as
+        # floats.  Neither enters the buffer: the median carries on from the
+        # readings around them.
+        for bad in [float('nan'), float('inf'), float('-inf'), None]:
+            with self.subTest(bad=bad):
+                self.assertEqual(run_median(Co2Median(120, 15), [500, 510, bad, 505, 520]),
+                                 [None, None, None, 505, 510])
+
+    def test_known_leak_a_fault_across_two_polls(self):
+        """Timeline K(a): a fault that catches two consecutive polls gets
+        through as the milder of the two.  A leak, asserted as one."""
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 501, 440, 433, 502, 503]),
+                         [None, None, 500, 440, 440, 502])
+
+    def test_known_leak_two_spikes_within_three_readings(self):
+        """Timeline K(b): two independent spikes in the same direction within
+        three readings."""
+        self.assertEqual(run_median(Co2Median(120, 15), [500, 501, 433, 502, 440, 503]),
+                         [None, None, 500, 501, 440, 502])
+
+    def test_a_real_one_reading_plume_is_removed_too(self):
+        """Timeline L: the cost.  The median cannot tell a real one-reading
+        plume from a fault."""
+        self.assertEqual(run_median(Co2Median(120, 15), [420, 421, 700, 422, 421]),
+                         [None, None, 421, 422, 422])
+
+    def test_failover_back_to_an_aged_buffer(self):
+        """Timeline H: a proxy answers for a while, then a [[SensorN]] takes
+        over.  The buffer holds only sensor readings, by now older than
+        fresh_secs: CO2 is withheld as after a long outage."""
+        median = Co2Median(120, 15)
+        run_median(median, [500, 510, 505])
+        self.assertIsNone(median.apply(co2_at(600, 450)).rco2)
+
+class TestCo2MedianInGetReading(unittest.TestCase):
+    """Where the median is applied: to direct-sensor readings that passed
+    the freshness check, and to nothing else."""
+
+    @staticmethod
+    def fresh(age_secs, rco2):
+        return make_reading(age_secs=age_secs, rco2=rco2)
+
+    def test_a_sensor_reading_gets_the_median(self):
+        cfg = make_cfg(sources=[make_source()])
+        readings = [self.fresh(2 * POLL, 500), self.fresh(POLL, 800), self.fresh(0, 510)]
+        with mock.patch('user.airgradient.collect_data',
+                        side_effect=[(r, False) for r in readings]):
+            out = [user.airgradient.get_reading(cfg) for _ in readings]
+        self.assertEqual([r.rco2 for r in out], [None, None, 510])
+        self.assertEqual([r.pm02Compensated for r in out], [1.03] * 3)
+
+    def test_a_failed_poll_appends_nothing(self):
+        cfg = make_cfg(sources=[make_source()])
+        side_effect = [(self.fresh(45, 500), False), (None, False),
+                       (self.fresh(15, 520), False), (None, False),
+                       (self.fresh(0, 510), False)]
+        with mock.patch('user.airgradient.collect_data', side_effect=side_effect):
+            out = [user.airgradient.get_reading(cfg) for _ in side_effect]
+        self.assertEqual([r.rco2 if r else 'failed' for r in out],
+                         [None, 'failed', None, 'failed', 510])
+
+    def test_a_stale_reading_appends_nothing(self):
+        # With fresh_secs 120 and poll_secs 15, get_reading rejects anything
+        # older than 100 s, before it can reach the median.
+        cfg = make_cfg(sources=[make_source()])
+        side_effect = [(self.fresh(45, 500), False), (self.fresh(101, 300), False),
+                       (self.fresh(15, 520), False), (self.fresh(0, 510), False)]
+        with mock.patch('user.airgradient.collect_data', side_effect=side_effect):
+            out = [user.airgradient.get_reading(cfg) for _ in side_effect]
+        self.assertEqual([r.rco2 if r else 'stale' for r in out], [None, 'stale', None, 510])
+
+    def test_two_sensors_share_one_buffer(self):
+        """Timeline G: Sensor1 goes down and Sensor2 answers.  One buffer, so
+        the switchover shows one poll late rather than withholding CO2."""
+        s1 = make_source('Sensor1', hostname='s1')
+        s2 = make_source('Sensor2', hostname='s2')
+        cfg = make_cfg(sources=[s1, s2])
+        side_effect = [
+            (self.fresh(4 * POLL, 500), False),                       # s1
+            (self.fresh(3 * POLL, 501), False),                       # s1
+            (self.fresh(2 * POLL, 502), False),                       # s1
+            (None, False), (self.fresh(POLL, 450), False),            # s1 down, s2
+            (None, False), (self.fresh(0, 451), False),               # s1 down, s2
+        ]
+        with mock.patch('user.airgradient.collect_data', side_effect=side_effect) as m:
+            out = [user.airgradient.get_reading(cfg) for _ in range(5)]
+        self.assertEqual([c.args[0] for c in m.call_args_list],
+                         ['s1', 's1', 's1', 's1', 's2', 's1', 's2'])
+        self.assertEqual([r.rco2 for r in out], [None, None, 501, 501, 451])
+
+    def test_a_proxy_reading_is_passed_through_untouched(self):
+        cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True)])
+        readings = [self.fresh(30, 500), self.fresh(15, 800), self.fresh(0, 510)]
+        with mock.patch('user.airgradient.collect_data',
+                        side_effect=[(r, False) for r in readings]):
+            out = [user.airgradient.get_reading(cfg) for _ in readings]
+        for reading, got in zip(readings, out):
+            self.assertIs(got, reading)
+        self.assertEqual(cfg.co2_median.buf, [])
+
+    def test_proxy_then_sensor(self):
+        """Timeline H through get_reading.  Proxies are tried first, so the
+        proxy stub has to FAIL for the sensor to be asked at all.  Proxy
+        readings never touch the buffer: the sensor's CO2 is withheld until
+        the sensor itself has answered three times, and once the proxy is
+        back its CO2 passes through untouched."""
+        proxy = make_source('Proxy1', is_proxy=True, hostname='p1')
+        sensor = make_source('Sensor1', hostname='s1')
+        cfg = make_cfg(sources=[proxy, sensor])
+        back = self.fresh(0, 800)
+        side_effect = [
+            (self.fresh(4 * POLL, 600), False),                       # p1
+            (None, False), (self.fresh(3 * POLL, 500), False),        # p1 down, s1
+            (None, False), (self.fresh(2 * POLL, 510), False),        # p1 down, s1
+            (None, False), (self.fresh(POLL, 505), False),            # p1 down, s1
+            (back, False),                                            # p1 back
+        ]
+        with mock.patch('user.airgradient.collect_data', side_effect=side_effect):
+            out = [user.airgradient.get_reading(cfg) for _ in range(5)]
+        self.assertEqual([r.rco2 for r in out], [600, None, None, 505, 800])
+        self.assertIs(out[-1], back)
+        self.assertEqual([v for _, v in cfg.co2_median.buf], [500, 510, 505])
+
+class TestUnfilteredProxyLine(unittest.TestCase):
+    """airgradient-proxy 2.2 sends rco2Unfiltered beside every rco2, so a
+    live proxy reading with rco2 and no rco2Unfiltered came from an older
+    proxy, which does not filter CO2.  Logged once per proxy per run."""
+
+    LINE = 'INFO:user.airgradient:airgradient-proxy at %s:8080 serves unfiltered CO2; upgrade it to 2.2 or later.'
+
+    @staticmethod
+    def now_iso():
+        return datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+    def proxy_json(self, **fields):
+        pkt = proxy_pkt(self.now_iso())
+        pkt.update(fields)
+        return {k: v for k, v in pkt.items() if v is not None}
+
+    def poll(self, cfg, answers):
+        """One get_reading per answer; each answer maps a hostname to the
+        json it returns, and a hostname it does not name refuses the
+        connection."""
+        import requests
+
+        def get(url, timeout):
+            host = url.split('/')[2].split(':')[0]
+            if host not in answer:
+                raise requests.exceptions.ConnectionError('refused')
+            return FakeResponse(answer[host])
+        out = []
+        with mock.patch('user.airgradient.requests.get', side_effect=get):
+            for answer in answers:
+                out.append(user.airgradient.get_reading(cfg))
+        return out
+
+    def test_logged_once_per_proxy(self):
+        p1 = make_source('Proxy1', is_proxy=True, hostname='p1')
+        p2 = make_source('Proxy2', is_proxy=True, hostname='p2')
+        cfg = make_cfg(sources=[p1, p2])
+        old = self.proxy_json()
+        with self.assertLogs('user.airgradient', level='INFO') as logs:
+            out = self.poll(cfg, [{'p1': old}, {'p1': old}, {'p2': old},
+                                  {'p1': old}, {'p2': old}])
+        self.assertEqual([line for line in logs.output if 'unfiltered' in line],
+                         [self.LINE % 'p1', self.LINE % 'p2'])
+        # Passed through as it is: no median for an old proxy either.
+        self.assertEqual([r.rco2 for r in out], [514.0] * 5)
+        self.assertEqual(cfg.co2_median.buf, [])
+
+    def test_not_logged_for_a_proxy_that_sends_rco2_unfiltered(self):
+        cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True, hostname='p1')])
+        with self.assertNoLogs('user.airgradient', level='INFO'):
+            self.poll(cfg, [{'p1': self.proxy_json(rco2Unfiltered=514.0)}])
+
+    def test_not_logged_while_a_2_2_proxy_withholds_co2(self):
+        # A 2.2 proxy's first two readings after a restart carry
+        # rco2Unfiltered and no rco2.
+        cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True, hostname='p1')])
+        with self.assertNoLogs('user.airgradient', level='INFO'):
+            self.poll(cfg, [{'p1': self.proxy_json(rco2=None, rco2Unfiltered=514.0)}])
+
+    def test_not_logged_for_a_proxy_whose_monitor_reports_no_co2(self):
+        cfg = make_cfg(sources=[make_source('Proxy1', is_proxy=True, hostname='p1')])
+        with self.assertNoLogs('user.airgradient', level='INFO'):
+            self.poll(cfg, [{'p1': self.proxy_json(rco2=None)}])
+
+    def test_not_logged_for_a_sensor(self):
+        # A monitor's own json never carries rco2Unfiltered.
+        cfg = make_cfg(sources=[make_source('Sensor1', hostname='s1', port=80)])
+        with self.assertNoLogs('user.airgradient', level='INFO'):
+            self.poll(cfg, [{'s1': VALID_PKT.copy()}])
+
+    def test_not_logged_from_the_backfill(self):
+        # A 2.2 proxy's archive records from before its upgrade have no
+        # rco2Unfiltered.  The check is on the live path only.
+        source = make_source('Proxy1', is_proxy=True, hostname='p1')
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([proxy_pkt(), proxy_pkt()])), \
+                self.assertNoLogs('user.airgradient', level='INFO'):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertEqual(len(readings), 2)
+        self.assertFalse(source.unfiltered_co2_logged)
+
+class StopPolling(BaseException):
+    """Ends DevicePoller.poll_device's infinite loop.  A BaseException, so
+    the loop's own `except Exception` cannot swallow it."""
+
+def run_poller(cfg, get_reading, sleeps):
+    """Run poll_device until its sleeps-th sleep, with get_reading stubbed;
+    the calls in the order they happened."""
+    calls = []
+
+    def sleep(secs):
+        calls.append(('sleep', secs))
+        if sum(1 for c in calls if c[0] == 'sleep') == sleeps:
+            raise StopPolling()
+
+    def poll(cfg):
+        calls.append(('poll',))
+        return get_reading(cfg)
+    with mock.patch.object(user.airgradient.time, 'sleep', sleep), \
+            mock.patch('user.airgradient.get_reading', poll):
+        try:
+            user.airgradient.DevicePoller(cfg).poll_device()
+        except StopPolling:
+            pass
+    return calls
+
+class TestPollDevice(unittest.TestCase):
+
+    def test_sleeps_before_the_first_poll(self):
+        """__init__ has just taken the startup reading.  Polling again at
+        once would fetch the same sample, which would count twice among the
+        3 the median is taken of."""
+        reading = make_reading()
+        cfg = make_cfg(poll_secs=15)
+        calls = run_poller(cfg, lambda cfg: reading, sleeps=3)
+        self.assertEqual(calls, [('sleep', 15), ('poll',), ('sleep', 15), ('poll',), ('sleep', 15)])
+        self.assertIs(cfg.reading, reading)
+
+    def test_a_failed_poll_keeps_the_last_reading(self):
+        startup = make_reading()
+        cfg = make_cfg(reading=startup)
+        run_poller(cfg, lambda cfg: None, sleeps=2)
+        self.assertIs(cfg.reading, startup)
+
+    def test_a_poll_that_raises_keeps_the_last_reading_and_polls_on(self):
+        def explode(cfg):
+            raise RuntimeError('boom')
+        startup = make_reading()
+        cfg = make_cfg(reading=startup)
+        with self.assertLogs('user.airgradient', level='ERROR'):
+            calls = run_poller(cfg, explode, sleeps=3)
+        self.assertEqual(calls.count(('poll',)), 2)
+        self.assertIs(cfg.reading, startup)
+
+    def test_startup_timeline(self):
+        """Timeline D end to end: the startup reading in __init__, then the
+        poller's.  CO2 is absent from the first two -- every other field is
+        there -- and the median of three arrives with the third."""
+        engine = mock.Mock()
+        engine.console.archive_interval = 300
+        config = {
+            'AirGradient': {
+                'enable_aqi': 'false',
+                'LoopFields': dict(LOOP_FIELDS),
+                'Sensor1': {'enable': True, 'hostname': 'sensor1'},
+            },
+        }
+        readings = [make_reading(age_secs=2 * POLL, rco2=500),
+                    make_reading(age_secs=POLL, rco2=800),
+                    make_reading(age_secs=0, rco2=510)]
+        with mock.patch('user.airgradient.collect_data',
+                        side_effect=[(r, False) for r in readings]), \
+                mock.patch('user.airgradient.threading.Thread'):
+            ag = AirGradient(engine, config)
+            self.assertIsInstance(ag.cfg.co2_median, Co2Median)
+            self.assertEqual(ag.cfg.co2_median.age_limit_secs, 127.5)
+            event = TestNewLoopPacket.make_event()
+            ag.new_loop_packet(event)
+            self.assertNotIn('co2', event.packet)
+            self.assertEqual(event.packet['pm2_5'], 1.03)
+
+            run_poller(ag.cfg, user.airgradient.get_reading, sleeps=2)
+            self.assertIsNone(ag.cfg.reading.rco2)
+            run_poller(ag.cfg, user.airgradient.get_reading, sleeps=2)
+        event = TestNewLoopPacket.make_event()
+        ag.new_loop_packet(event)
+        self.assertEqual(event.packet['co2'], 510)
 
 class TestNewLoopPacket(unittest.TestCase):
 
@@ -704,6 +1244,21 @@ class TestNewLoopPacket(unittest.TestCase):
         event = self.make_event()
         ag.new_loop_packet(event)
         self.assertEqual(event.packet, {'usUnits': weewx.US})
+
+    def test_a_non_finite_reading_does_not_stop_weewxd(self):
+        """A NaN pm2_5 used to reach the AQI calculation, which raised on
+        weewxd's main thread -- new_loop_packet has no handler, so weewxd
+        stopped.  Fetched, parsed and inserted as the loop would."""
+        cfg = make_cfg(sources=[make_source()])
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse(non_finite_pkt())):
+            reading = user.airgradient.get_reading(cfg)
+        ag = self.make_airgradient(reading)
+        event = self.make_event()
+        ag.new_loop_packet(event)
+        for field in ['pm2_5', 'co2', 'pm2_5_aqi', 'pm2_5_aqi_color']:
+            self.assertNotIn(field, event.packet)
+        self.assertEqual(event.packet['pm1_0'], 0.67)
 
     def test_an_outage_is_logged_once_each_way_with_its_length(self):
         """ERROR when the readings go stale, nothing more while they stay
@@ -1213,6 +1768,17 @@ class TestFetchProxyArchiveRecords(unittest.TestCase):
             'http://proxy1:8080/fetch-archive-records?since_ts=1000,max_ts=1300')
         self.assertEqual(get.call_args.kwargs['timeout'], 1)
 
+    def test_non_finite_numbers_in_a_record_are_missing(self):
+        source = make_source('Proxy1', is_proxy=True)
+        with mock.patch('user.airgradient.requests.get',
+                        return_value=FakeResponse([non_finite_pkt(measurementTime='2027-10-27T18:58:17.000Z'),
+                                                   proxy_pkt()])):
+            readings = user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
+        self.assertIsNone(readings[0].pm02Compensated)
+        self.assertIsNone(readings[0].atmp)
+        # Averaged over the records that carry the field.
+        self.assertEqual(user.airgradient.average_readings(readings, weewx.METRIC, LOOP_FIELDS)['pm2_5'], 1.03)
+
     def test_records_parsed(self):
         source = make_source('Proxy1', is_proxy=True)
         with mock.patch('user.airgradient.requests.get',
@@ -1294,7 +1860,7 @@ class TestFetchProxyArchiveRecords(unittest.TestCase):
         with mock.patch('user.airgradient.requests.get',
                         return_value=FakeResponse([proxy_pkt()])), \
              mock.patch('user.airgradient.reading_from_json', side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
 
     def test_unreachable_proxy_returns_none(self):
@@ -1307,7 +1873,7 @@ class TestFetchProxyArchiveRecords(unittest.TestCase):
     def test_terminate_passes_through(self):
         source = make_source('Proxy1', is_proxy=True)
         with mock.patch('user.airgradient.requests.get', side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 user.airgradient.fetch_proxy_archive_records(source, 1000, 1300)
 
 class TestFetchProxyTwoMinuteReading(unittest.TestCase):
@@ -1360,7 +1926,7 @@ class TestFetchProxyTwoMinuteReading(unittest.TestCase):
     def test_terminate_passes_through(self):
         source = make_source('Proxy1', is_proxy=True)
         with mock.patch('user.airgradient.requests.get', side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 user.airgradient.fetch_proxy_two_minute_reading(source)
 
     def test_terminate_while_parsing_passes_through(self):
@@ -1368,7 +1934,7 @@ class TestFetchProxyTwoMinuteReading(unittest.TestCase):
         with mock.patch('user.airgradient.requests.get',
                         return_value=FakeResponse(proxy_pkt())), \
              mock.patch('user.airgradient.reading_from_json', side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 user.airgradient.fetch_proxy_two_minute_reading(source)
 
 class TestAverageReadings(unittest.TestCase):
@@ -1696,7 +2262,7 @@ class TestNewArchiveRecord(unittest.TestCase):
         ag = self.make_airgradient(loop_fields={'pm02Compensated': 'pm2_5'})
         with mock.patch('user.airgradient.fetch_proxy_archive_records',
                         side_effect=Terminate()):
-            with self.assertRaises(Terminate):
+            with weewxd_running(), self.assertRaises(Terminate):
                 ag.new_archive_record(self.make_event(1300))
 
 class TestTwoMinuteStandIn(unittest.TestCase):

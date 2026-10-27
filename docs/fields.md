@@ -16,40 +16,47 @@ description: Every AirGradient field you can map, using them in WeeWX reports �
 Any field the monitor reports can be mapped in
 [`[[LoopFields]]`](configuration.md#the-loopfields-mapping).  The full list:
 
-| AirGradient field | Contents                                                         |
-|-------------------|------------------------------------------------------------------|
-| `serialno`        | Serial number of the monitor                                     |
-| `wifi`            | WiFi signal strength                                             |
-| `pm01`            | PM1.0 in µg/m³ (atmospheric environment)                         |
-| `pm02`            | PM2.5 in µg/m³ (atmospheric environment)                         |
-| `pm10`            | PM10 in µg/m³ (atmospheric environment)                          |
-| `pm02Compensated` | PM2.5 in µg/m³ with correction applied (firmware 3.1.4 onwards)  |
-| `pm01Standard`    | PM1.0 in µg/m³ (standard particle)                               |
-| `pm02Standard`    | PM2.5 in µg/m³ (standard particle)                               |
-| `pm10Standard`    | PM10 in µg/m³ (standard particle)                                |
-| `rco2`            | CO2 in ppm                                                       |
-| `pm003Count`      | Particle count 0.3µm per dL                                      |
-| `pm005Count`      | Particle count 0.5µm per dL                                      |
-| `pm01Count`       | Particle count 1.0µm per dL                                      |
-| `pm02Count`       | Particle count 2.5µm per dL                                      |
-| `pm50Count`       | Particle count 5.0µm per dL (indoor monitors only)               |
-| `pm10Count`       | Particle count 10µm per dL (indoor monitors only)                |
-| `atmp`            | Temperature in °C (converted to the loop packet's unit system)   |
-| `atmpCompensated` | Temperature in °C with correction applied (converted, as above)  |
-| `rhum`            | Relative humidity                                                |
-| `rhumCompensated` | Relative humidity with correction applied                        |
-| `tvocIndex`       | Sensirion VOC index                                              |
-| `tvocRaw`         | VOC raw value                                                    |
-| `noxIndex`        | Sensirion NOx index                                              |
-| `noxRaw`          | NOx raw value                                                    |
-| `boot`            | Counts every measurement cycle; low counts indicate restarts     |
-| `bootCount`       | Same as boot (Home Assistant compatibility; deprecated)          |
-| `ledMode`         | Current configuration of the LED mode                            |
-| `firmware`        | Current firmware version                                         |
-| `model`           | Current model name                                               |
+| AirGradient field | Contents                                                                     |
+|-------------------|------------------------------------------------------------------------------|
+| `serialno`        | Serial number of the monitor                                                 |
+| `wifi`            | WiFi signal strength                                                         |
+| `pm01`            | PM1.0 in µg/m³ (atmospheric environment)                                     |
+| `pm02`            | PM2.5 in µg/m³ (atmospheric environment)                                     |
+| `pm10`            | PM10 in µg/m³ (atmospheric environment)                                      |
+| `pm02Compensated` | PM2.5 in µg/m³ with correction applied (firmware 3.1.4 onwards)              |
+| `pm01Standard`    | PM1.0 in µg/m³ (standard particle)                                           |
+| `pm02Standard`    | PM2.5 in µg/m³ (standard particle)                                           |
+| `pm10Standard`    | PM10 in µg/m³ (standard particle)                                            |
+| `rco2`            | CO2 in ppm, the median of the last 3 readings from a monitor polled directly |
+| `pm003Count`      | Particle count 0.3µm per dL                                                  |
+| `pm005Count`      | Particle count 0.5µm per dL                                                  |
+| `pm01Count`       | Particle count 1.0µm per dL                                                  |
+| `pm02Count`       | Particle count 2.5µm per dL                                                  |
+| `pm50Count`       | Particle count 5.0µm per dL (indoor monitors only)                           |
+| `pm10Count`       | Particle count 10µm per dL (indoor monitors only)                            |
+| `atmp`            | Temperature in °C (converted to the loop packet's unit system)               |
+| `atmpCompensated` | Temperature in °C with correction applied (converted, as above)              |
+| `rhum`            | Relative humidity                                                            |
+| `rhumCompensated` | Relative humidity with correction applied                                    |
+| `tvocIndex`       | Sensirion VOC index                                                          |
+| `tvocRaw`         | VOC raw value                                                                |
+| `noxIndex`        | Sensirion NOx index                                                          |
+| `noxRaw`          | NOx raw value                                                                |
+| `boot`            | Counts every measurement cycle; low counts indicate restarts                 |
+| `bootCount`       | Same as boot (Home Assistant compatibility; deprecated)                      |
+| `ledMode`         | Current configuration of the LED mode                                        |
+| `firmware`        | Current firmware version                                                     |
+| `model`           | Current model name                                                           |
 
 All fields are optional: AirGradient models differ in which fields they
 report, and missing fields are simply skipped.
+
+`rco2` is the median of the monitor's last 3 readings rather than the latest
+one, which removes the single-reading drops and jumps an AirGradient's CO2
+now and then reports, at the cost of lagging a real change by about one
+`poll_secs`.  Through an airgradient-proxy, only 2.2 and later take the
+median.  See
+[CO2: the median of the last 3 readings](configuration.md#co2-the-median-of-the-last-3-readings).
 
 Temperature fields (`atmp`, `atmpCompensated`) are reported in Celsius and
 converted to the unit system of the packet or record they are written into.

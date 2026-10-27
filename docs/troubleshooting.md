@@ -34,6 +34,25 @@ description: Log messages, the manual collector harness, and running the hermeti
 * `airgradient archive record from <host> could not be parsed, ...`: the
   proxy answered, but one of the records it sent could not be used.  That
   record is skipped; the rest of the period is unaffected.
+* `airgradient-proxy at <host>:<port> serves unfiltered CO2; upgrade it to
+  2.2 or later.`: that proxy predates 2.2 and does not take the median of
+  its CO2 readings, so a single-reading spike reaches your loop packets and
+  archive records.  weewx-airgradient passes the value through rather than
+  filter it this far downstream.  Logged once per proxy each time WeeWX
+  starts.  Upgrade the proxy.  See
+  [CO2: the median of the last 3 readings](configuration.md#co2-the-median-of-the-last-3-readings).
+
+## CO2 is missing for a short while
+
+The median needs 3 readings from a monitor polled directly, none more than
+`max(120, 3 * poll_secs)` seconds plus half a poll old (127.5 seconds at the
+default).  Until there are 3, CO2 is left out of loop packets and every
+other field arrives as usual.  That is about two polls after WeeWX starts,
+and again whenever the monitor's last readings have aged past the limit:
+after an outage of more than about 112 seconds at the default, or after an
+airgradient-proxy has been answering for that long.  A 2.2 proxy leaves CO2
+out for 60 to 90 seconds after it restarts.  See
+[CO2: the median of the last 3 readings](configuration.md#co2-the-median-of-the-last-3-readings).
 
 ## The columns are empty for a stretch of time
 
@@ -63,6 +82,10 @@ Run the module directly against a monitor:
 ```
 PYTHONPATH=<weewx-bin-dir> python bin/user/airgradient.py --test-collector --hostname <monitor> [--port <port>]
 ```
+
+It prints each reading as the monitor reports it, so its `rco2` is the raw
+value and can differ from the CO2 in loop packets, which is the median of
+the last 3 readings.
 
 ## Running the test suite
 

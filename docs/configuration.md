@@ -96,6 +96,47 @@ wins and no further sources are tried.
 A reading is considered fresh for `max(120, 3 * poll_secs)` seconds; stale
 readings are never inserted into loop packets.
 
+## CO2: the median of the last 3 readings
+
+An AirGradient's CO2 now and then drops or jumps for a single reading, by
+anything from a few ppm to a few hundred, and that one reading can become
+the day's low or high.  So the CO2 written into loop packets is the median of
+the last 3 readings rather than the latest one: a single bad reading is
+out-voted by the two around it, whichever way it went.
+
+* From a monitor polled directly (`[[SensorN]]`), weewx-airgradient takes the
+  median.  All the `[[SensorN]]` sources share the same 3 readings, so a
+  failover from one monitor to the next shows one poll late rather than
+  leaving CO2 empty.
+* Through an airgradient-proxy, the proxy takes the median and
+  weewx-airgradient passes its CO2 through.  Only airgradient-proxy 2.2 and
+  later do this.  An older proxy's CO2 arrives unfiltered, and
+  weewx-airgradient logs once that the proxy should be upgraded — see
+  [Troubleshooting](troubleshooting.md#log-messages).
+
+The cost is lag: a real change in CO2 arrives about one `poll_secs` late (15
+seconds at the default).  A real change that lasts a single reading, such as
+a brief plume drifting past an outdoor monitor, is removed along with the
+faults.
+
+The median removes a fault only if the fault shows up in a single poll.  One
+or two bad samples from the monitor's CO2 sensor spoil 12 to 16 seconds of
+the CO2 it reports, so at the default `poll_secs` of 15 a fault almost
+always lands in one poll.  Poll faster and it increasingly lands in two or more, and the
+median lets it through: at `poll_secs = 10`, between a fifth and three fifths
+of faults get through, and at 6 or less, every one.  Leave `poll_secs` at 15
+or more for a monitor polled directly.
+
+CO2 is also left out of loop packets until there are 3 readings to take the
+median of.  A reading counts if it came from a monitor polled directly and
+is no more than `max(120, 3 * poll_secs)` seconds plus half a poll old
+(127.5 seconds at the default).  So CO2 is missing for about two polls after
+WeeWX starts, and again whenever the monitor's last readings have aged past
+that: after an outage of more than about 112 seconds at the default, or
+after an airgradient-proxy has been answering for that long.  Every other
+field arrives as usual meanwhile.  The median is always on; there is no
+option.
+
 ## The [[LoopFields]] mapping
 
 Each entry maps an AirGradient field (left side) to the loop-packet field
@@ -115,8 +156,7 @@ wview_extended schema, so mapping to them needs no database work.  `tvoc`,
 `tvocIndex`, `nox` and `noxIndex` are not: mapped as they stand they are
 current values only — `$current.tvoc` works, but there are no archive
 records, no aggregates and no graphs, and nothing is logged to say so.  See
-[Adding TVOC/NOx columns to the
-database](fields.md#adding-tvocnox-columns-to-the-database-optional).
+[Adding TVOC/NOx columns to the database](fields.md#adding-tvocnox-columns-to-the-database-optional).
 
 Temperature fields (`atmp`, `atmpCompensated`) are reported in Celsius and
 converted to the unit system of the packet they are written into.  All

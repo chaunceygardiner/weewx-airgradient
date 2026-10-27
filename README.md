@@ -64,22 +64,28 @@ echo '.schema archive' | sqlite3 /var/lib/weewx/weewx.sdb | grep pm2_5
 With the suggested `[LoopFields]` mapping (shown in Configuration below),
 every loop packet is populated with:
 
-| Loop field  | AirGradient field | Contents                                        |
-|-------------|-------------------|-------------------------------------------------|
-| `pm1_0`     | `pm01`            | PM1.0 concentration (µg/m³)                     |
-| `pm2_5`     | `pm02Compensated` | PM2.5 concentration (µg/m³), compensated        |
-| `pm10_0`    | `pm10`            | PM10 concentration (µg/m³)                      |
-| `co2`       | `rco2`            | CO2 (ppm)                                       |
-| `tvocIndex` | `tvocIndex`       | Sensirion TVOC index                            |
-| `tvoc`      | `tvocRaw`         | TVOC raw value                                  |
-| `noxIndex`  | `noxIndex`        | Sensirion NOx index                             |
-| `nox`       | `noxRaw`          | NOx raw value                                   |
+| Loop field  | AirGradient field | Contents                                                                    |
+|-------------|-------------------|-----------------------------------------------------------------------------|
+| `pm1_0`     | `pm01`            | PM1.0 concentration (µg/m³)                                                 |
+| `pm2_5`     | `pm02Compensated` | PM2.5 concentration (µg/m³), compensated                                    |
+| `pm10_0`    | `pm10`            | PM10 concentration (µg/m³)                                                  |
+| `co2`       | `rco2`            | CO2 (ppm), the median of the last 3 readings from a monitor polled directly |
+| `tvocIndex` | `tvocIndex`       | Sensirion TVOC index                                                        |
+| `tvoc`      | `tvocRaw`         | TVOC raw value                                                              |
+| `noxIndex`  | `noxIndex`        | Sensirion NOx index                                                         |
+| `nox`       | `noxRaw`          | NOx raw value                                                               |
 
 The `pm1_0`, `pm2_5`, `pm10_0` and `co2` fields are in the wview_extended
 schema, so WeeWX accumulates them into archive records (and history graphs)
 with no extra configuration.  The TVOC and NOx fields are not in the schema;
 they are available in reports via `$current`, and a later section shows how
 to add database columns for them if you want aggregates and graphs.
+
+CO2 is the median of the monitor's last 3 readings, not the latest one, so a
+single reading that drops or jumps is out-voted by the two around it.  For a
+monitor polled directly, weewx-airgradient takes the median; through an
+airgradient-proxy, the proxy takes it (2.2 and later).  See
+[CO2: the median of the last 3 readings](#co2-the-median-of-the-last-3-readings).
 
 Two more observation types are available everywhere in reports and graphs —
 without being stored in the database — via WeeWX
@@ -331,6 +337,46 @@ reading wins and no further sources are tried.
 A reading is considered fresh for `max(120, 3 * poll_secs)` seconds; stale
 readings are never inserted into loop packets.
 
+### CO2: the median of the last 3 readings
+
+An AirGradient's CO2 now and then drops or jumps for a single reading, by
+anything from a few ppm to a few hundred, and that one reading can become
+the day's low or high.  So the CO2 written into loop packets is the median of
+the last 3 readings rather than the latest one: a single bad reading is
+out-voted by the two around it, whichever way it went.
+
+* From a monitor polled directly (`[[SensorN]]`), weewx-airgradient takes the
+  median.  All the `[[SensorN]]` sources share the same 3 readings, so a
+  failover from one monitor to the next shows one poll late rather than
+  leaving CO2 empty.
+* Through an airgradient-proxy, the proxy takes the median and
+  weewx-airgradient passes its CO2 through.  Only airgradient-proxy 2.2 and
+  later do this.  An older proxy's CO2 arrives unfiltered, and
+  weewx-airgradient logs once that the proxy should be upgraded.
+
+The cost is lag: a real change in CO2 arrives about one `poll_secs` late (15
+seconds at the default).  A real change that lasts a single reading, such as
+a brief plume drifting past an outdoor monitor, is removed along with the
+faults.
+
+The median removes a fault only if the fault shows up in a single poll.  One
+or two bad samples from the monitor's CO2 sensor spoil 12 to 16 seconds of
+the CO2 it reports, so at the default `poll_secs` of 15 a fault almost
+always lands in one poll.  Poll faster and it increasingly lands in two or more, and the
+median lets it through: at `poll_secs = 10`, between a fifth and three fifths
+of faults get through, and at 6 or less, every one.  Leave `poll_secs` at 15
+or more for a monitor polled directly.
+
+CO2 is also left out of loop packets until there are 3 readings to take the
+median of.  A reading counts if it came from a monitor polled directly and
+is no more than `max(120, 3 * poll_secs)` seconds plus half a poll old
+(127.5 seconds at the default).  So CO2 is missing for about two polls after
+WeeWX starts, and again whenever the monitor's last readings have aged past
+that: after an outage of more than about 112 seconds at the default, or
+after an airgradient-proxy has been answering for that long.  Every other
+field arrives as usual meanwhile.  The median is always on; there is no
+option.
+
 ### The [[LoopFields]] mapping
 
 Each entry maps an AirGradient field (left side) to the loop-packet field
@@ -435,6 +481,11 @@ is what the mapping asks for, and a temperature arrives in the record's own
 unit system.  A backfilled `pm2_5` also restores `pm2_5_aqi` and
 `pm2_5_aqi_color` for that period, since the AQI xtype computes them from
 what is stored.
+
+Backfilled CO2 is the proxy's median only from airgradient-proxy 2.2 on.  A
+record an older proxy wrote, including one a 2.2 proxy wrote before it was
+upgraded, averages the CO2 as the monitor reported it, single-reading spikes
+and all.
 
 **Set airgradient-proxy's `archive-interval-secs` to match WeeWX's archive
 interval.**  WeeWX logs the interval it is using at startup (`Using archive
@@ -654,6 +705,21 @@ out of the mapping.
   configured proxy could answer for that period, so those columns were left
   empty.  Logged once per archive record, which is also how a proxy that is
   down makes itself heard for as long as it stays down.
+* `airgradient-proxy at <host>:<port> serves unfiltered CO2; upgrade it to
+  2.2 or later.`: that proxy predates 2.2 and does not take the median of
+  its CO2 readings, so a single-reading spike reaches your loop packets and
+  archive records.  weewx-airgradient passes the value through rather than
+  filter it this far downstream.  Logged once per proxy each time WeeWX
+  starts.  Upgrade the proxy.
+* **CO2 is missing for a short while.**  The median needs 3 readings from a
+  monitor polled directly, none more than `max(120, 3 * poll_secs)` seconds
+  plus half a poll old (127.5 seconds at the default).  Until there are 3,
+  CO2 is left out of loop packets and every other field arrives as usual.
+  That is about two polls after WeeWX starts, and again whenever the
+  monitor's last readings have aged past the limit: after an outage of more
+  than about 112 seconds at the default, or after an airgradient-proxy has
+  been answering for that long.  A 2.2 proxy leaves CO2 out for 60 to 90
+  seconds after it restarts.
 * **The columns are empty for a stretch of time.**  WeeWX was not running
   then, and the periods were filled only if a proxy could answer for them —
   see [Filling gaps after downtime](#filling-gaps-after-downtime).  With no
@@ -666,6 +732,10 @@ out of the mapping.
   ```
   PYTHONPATH=<weewx-bin-dir> python bin/user/airgradient.py --test-collector --hostname <monitor> [--port <port>]
   ```
+
+  It prints each reading as the monitor reports it, so its `rco2` is the raw
+  value and can differ from the CO2 in loop packets, which is the median of
+  the last 3 readings.
 
 # Running the test suite
 

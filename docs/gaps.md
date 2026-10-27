@@ -28,6 +28,11 @@ unit system.  A backfilled `pm2_5` also restores `pm2_5_aqi` and
 `pm2_5_aqi_color` for that period, since the AQI xtype computes them from
 what is stored.
 
+Backfilled CO2 is the proxy's median only from airgradient-proxy 2.2 on.  A
+record an older proxy wrote, including one a 2.2 proxy wrote before it was
+upgraded, averages the CO2 as the monitor reported it, single-reading spikes
+and all.
+
 Non-numeric fields are not filled.  `[[LoopFields]]` can map `serialno`,
 `ledMode`, `firmware` and `model`, and there is no average of those to write.
 

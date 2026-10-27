@@ -1,6 +1,37 @@
 # weewx-airgradient change history
 
-## 4.0.1 (in development)
+## 4.1 (in development)
+- CO2 from a monitor polled directly ([[SensorN]]) is now the median of
+  its last 3 readings rather than the latest one.  An AirGradient's CO2 now
+  and then drops or jumps for a single reading, and that one reading could
+  become the day's low or high; the median removes it, whichever way it
+  went.  The cost is about one poll_secs of lag on a real change (15
+  seconds at the default), and a real change that lasts a single reading is
+  removed too.  CO2 is left out of loop packets until there are 3 readings
+  no more than max(120, 3 * poll_secs) seconds plus half a poll old (127.5
+  seconds at the default): about two polls after WeeWX starts, and again
+  after an outage of more than about 112 seconds at the default, or after
+  an airgradient-proxy has been answering for that long.  Every other field
+  is unaffected.
+  All the [[SensorN]] sources share the 3 readings, so a failover to the
+  next monitor shows one poll late.  It is always on; there is no option.
+- Through an airgradient-proxy, CO2 is passed through as before:
+  airgradient-proxy 2.2 and later take the same median themselves, where
+  each reading is seen exactly once.  An older proxy sends its CO2
+  unfiltered, and weewx-airgradient now says so once per proxy each time it
+  starts: "airgradient-proxy at <host>:<port> serves unfiltered CO2; upgrade
+  it to 2.2 or later."  That proxy's CO2 is still passed through as it is.
+- The poller now waits poll_secs before its first poll, rather than polling
+  again a fraction of a second after the startup reading and fetching the
+  same sample twice.
+- A number field that arrives as NaN or Infinity -- which Python's json
+  accepts, from a monitor or a proxy -- is now treated as missing.  A NaN
+  PM2.5 used to stop WeeWX: the AQI calculation could not convert it, and
+  it runs on WeeWX's main thread.
+- weewxd's shutdown is now recognized by the running weewxd's own
+  Terminate class rather than by the name alone, so an exception from some
+  other library that happens to be called Terminate can no longer be
+  mistaken for a request to stop.
 - When a fresh reading arrives after an outage, the log line saying so
   now says how long readings were missing ("Fresh reading available
   again after 13 min."), so an outage can be read whole from that one
