@@ -54,7 +54,7 @@ from weewx.engine import StdService
 
 log = logging.getLogger(__name__)
 
-WEEWX_AIRGRADIENT_VERSION = "4.0"
+WEEWX_AIRGRADIENT_VERSION = "4.1"
 
 if sys.version_info[0] < 3 or (sys.version_info[0] == 3 and sys.version_info[1] < 9):
     raise weewx.UnsupportedFeature(

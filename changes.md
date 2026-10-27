@@ -1,6 +1,6 @@
 # weewx-airgradient change history
 
-## 4.1 (in development)
+## 4.1 10/27/2026
 - CO2 from a monitor polled directly ([[SensorN]]) is now the median of
   its last 3 readings rather than the latest one.  An AirGradient's CO2 now
   and then drops or jumps for a single reading, and that one reading could
@@ -12,9 +12,9 @@
   seconds at the default): about two polls after WeeWX starts, and again
   after an outage of more than about 112 seconds at the default, or after
   an airgradient-proxy has been answering for that long.  Every other field
-  is unaffected.
-  All the [[SensorN]] sources share the 3 readings, so a failover to the
-  next monitor shows one poll late.  It is always on; there is no option.
+  is unaffected.  All the [[SensorN]] sources share the 3 readings, so a
+  failover to the next monitor shows one poll late.  It is always on; there
+  is no option.
 - Through an airgradient-proxy, CO2 is passed through as before:
   airgradient-proxy 2.2 and later take the same median themselves, where
   each reading is seen exactly once.  An older proxy sends its CO2
